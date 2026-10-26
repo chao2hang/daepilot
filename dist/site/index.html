@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DaePilot 0.3.4 下载</title>
+<meta name="description" content="DaePilot：dae eBPF 透明代理的 Android 客户端与 Magisk 模块。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231C6B58'/%3E%3Cpath d='M6 15L26 6L21 25L14 18Z' fill='%23F7F7F4'/%3E%3Cpath d='M14 18L26 6L21 25Z' fill='%23A9DCCB'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f7f7f4;
+    --surface: #ffffff;
+    --text: #181c1a;
+    --muted: #5b6560;
+    --line: #dce2de;
+    --accent: #1c6b58;
+    --accent-soft: #eef5f1;
+    --code: #f0f2ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1210;
+      --surface: #161b18;
+      --text: #e2e6e2;
+      --muted: #a7b2ac;
+      --line: #2b332f;
+      --accent: #83d5be;
+      --accent-soft: #15231e;
+      --code: #1d2420;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { width: min(760px, calc(100% - 40px)); margin: 0 auto; padding: 28px 0 56px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 24px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: -0.01em; }
+  .mark { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); display: grid; place-items: center; }
+  .mark svg { width: 16px; height: 16px; }
+  .version { font-size: 12.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
+  h1 { margin: 0; font-size: clamp(30px, 5vw, 38px); line-height: 1.2; letter-spacing: -0.025em; font-weight: 600; }
+  h2 { margin: 0 0 12px; font-size: 17px; font-weight: 600; }
+  p { margin: 0; }
+  .kicker { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .lede { color: var(--muted); margin-top: 12px; max-width: 620px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+  .button {
+    display: inline-flex; align-items: center; gap: 10px;
+    height: 44px; padding: 0 18px; border-radius: 8px;
+    font-size: 14px; font-weight: 500;
+  }
+  .button.primary { background: var(--accent); color: var(--bg); }
+  .button.primary:hover { text-decoration: none; filter: brightness(1.05); }
+  .button.secondary { border: 1px solid var(--line); color: var(--text); background: var(--surface); }
+  .button.secondary:hover { text-decoration: none; border-color: var(--muted); }
+  .button small { font-weight: 400; opacity: .75; }
+  .build { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  section { border-top: 1px solid var(--line); padding: 24px 0 4px; margin-top: 30px; }
+  ul, ol { margin: 0; padding-left: 20px; color: var(--muted); }
+  li { margin: 6px 0; }
+  li strong { color: var(--text); font-weight: 500; }
+  .download-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--surface);
+  }
+  .download-row + .download-row { margin-top: 8px; }
+  .file-name { font-weight: 500; overflow-wrap: anywhere; }
+  .file-meta { color: var(--muted); font-size: 12.5px; margin-top: 1px; }
+  .download-row a { white-space: nowrap; font-size: 14px; }
+  .hashbox { margin-top: 14px; padding: 12px 14px; background: var(--code); border-radius: 8px; }
+  .hashbox div + div { margin-top: 8px; }
+  .hashbox b { font-size: 12.5px; font-weight: 500; }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px; overflow-wrap: anywhere;
+  }
+  .hashbox code { color: var(--muted); }
+  .button.disabled, .chunk-link.disabled { opacity: .55; pointer-events: none; }
+  .progress { max-width: 440px; margin-top: 16px; }
+  .progress .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .progress .bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .progress p { margin-top: 6px; font-size: 12.5px; color: var(--muted); }
+  .note { color: var(--muted); font-size: 13.5px; }
+  .note strong { color: var(--text); font-weight: 500; }
+  .note p + p { margin-top: 8px; }
+  footer { border-top: 1px solid var(--line); margin-top: 34px; padding-top: 16px; color: var(--muted); font-size: 12.5px; }
+  @media (max-width: 520px) {
+    .wrap { width: calc(100% - 28px); padding-top: 20px; }
+    .download-row { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .actions .button { width: 100%; justify-content: center; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 12L20 4L16 21L10 14Z" fill="#F7F7F4"/><path d="M10 14L20 4L16 21Z" fill="#A9DCCB"/></svg>
+      </span>
+      DaePilot
+    </div>
+    <span class="version">0.3.4 · debug</span>
+  </header>
+
+  <main>
+    <p class="kicker">Android 8.0+ · arm64-v8a · Magisk / KernelSU / APatch</p>
+    <h1>dae 的 Android 客户端</h1>
+    <p class="lede">原生 Compose 控制端与内置模块。应用内直接请求 root 授权，授权通过后自动安装模块并创建 dae 运行环境。</p>
+
+    <div class="actions">
+      <a class="button primary" id="apk-button"
+         href="dl/0.3.4/DaePilot-0.3.4-debug.apk.txt"
+         data-url="dl/0.3.4/DaePilot-0.3.4-debug.apk.txt"
+         data-size="35297016" data-name="DaePilot-0.3.4-debug.apk" data-hashes="apk" download>
+        下载 APK <small>33.7 MiB</small>
+      </a>
+      <a class="button secondary" id="zip-button"
+         href="dl/0.3.4/daepilot-module.zip.txt"
+         data-url="dl/0.3.4/daepilot-module.zip.txt"
+         data-size="16831797" data-name="daepilot-module.zip" data-hashes="zip" download>
+        模块 zip <small>16.1 MiB</small>
+      </a>
+    </div>
+    <div class="progress" id="progress" hidden>
+      <div class="bar"><span id="progress-bar"></span></div>
+      <p id="progress-text"></p>
+    </div>
+    <p class="build">versionCode 7 · 2026-10-27 · dae 2.1.1 · 模块 0.1.2</p>
+
+    <section>
+      <h2>本次更新 (0.3.4)</h2>
+      <ul>
+        <li><strong>修复蜂窝移动数据流量分流与绕过。</strong>针对 Android 蜂窝数据网卡（如高通调制解调器 <code>rmnet_data*</code> 使用的 <code>ARPHRD_RAWIP</code> 封装）在 Netlink 报告为 <code>unknown519</code> 或 <code>rawip</code> 导致的链路层解析异常，已将 dae 链路层头长度判定修正为 0（无以太网帧头），正确加载 L3 TC eBPF 处理程序，解决蜂窝网络下 TCP/UDP 绕过代理被阻断的问题。</li>
+        <li><strong>模块与核心同步。</strong>内置 Magisk 模块更新至 v0.1.2，内置已打补丁的 arm64 dae v2.1.1 核心。</li>
+        <li><strong>配置校验与错误透出。</strong>配置校验失败时直接提取并显示 dae 的原始报错原因（如 token 识别错误或语法异常），并在模块与应用日志中完整保留，便于快速定位问题。</li>
+        <li><strong>热重载安全回滚。</strong>新配置热重载失败时，先校验备份配置是否健全；仅在备份有效时回滚，若备份损坏则拒绝回滚并明确报警，防止死循环。</li>
+        <li><strong>控制端诊断增强。</strong>应用 root shell 调用 ctl 统一合并标准错误（2&gt;&amp;1），确保 ctl fail 诊断信息完整到达应用事件记录与导出日志。</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>安装</h2>
+      <ol>
+        <li>安装 APK，打开 DaePilot。</li>
+        <li>点「启动代理」或首页的授权提示，在系统弹窗中允许 root。</li>
+        <li>应用会自动安装模块。若提示需要重启，重启设备后再继续。</li>
+        <li>导入订阅或节点，选择出口并启动代理。</li>
+      </ol>
+      <p class="note" style="margin-top:12px">之前拒绝过授权？到 root 管理器清除本应用的拒绝记录，再点「请求 root 权限」。</p>
+    </section>
+
+    <section>
+      <h2>文件与校验</h2>
+      <div class="download-row">
+        <div>
+          <div class="file-name">DaePilot-0.3.4-debug.apk</div>
+          <div class="file-meta">35,297,016 B · debug 签名</div>
+        </div>
+        <a href="dl/0.3.4/DaePilot-0.3.4-debug.apk.txt" class="chunk-link"
+           data-url="dl/0.3.4/DaePilot-0.3.4-debug.apk.txt" data-size="35297016"
+           data-name="DaePilot-0.3.4-debug.apk" data-hashes="apk" download>下载</a>
+      </div>
+      <div class="download-row">
+        <div>
+          <div class="file-name">daepilot-module.zip</div>
+          <div class="file-meta">16,831,797 B · 手动刷入备用</div>
+        </div>
+        <a href="dl/0.3.4/daepilot-module.zip.txt" class="chunk-link"
+           data-url="dl/0.3.4/daepilot-module.zip.txt" data-size="16831797"
+           data-name="daepilot-module.zip" data-hashes="zip" download>下载</a>
+      </div>
+      <div class="hashbox">
+        <div><b>APK SHA-256</b><br><code>a04100acd0ee6fc2766a14cc659c319b8d9bf79e51c9e697bcc1f158d1c9368a</code></div>
+        <div><b>模块 SHA-256</b><br><code>b94b1165c36f375f37221d6d86bec6331af3eab5cf60fb64d0a8390666229d90</code></div>
+        <div><a href="dl/0.3.4/SHA256SUMS">下载 SHA256SUMS</a></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>说明</h2>
+      <div class="note">
+        <p><strong>数据留在设备上。</strong>应用不内置任何机场账号、节点或订阅，不上传任何数据；节点与订阅只保存在应用私有目录和模块配置目录，文件权限 600。日志仅在你点击上传时发送。</p>
+        <p><strong>不要与其它透明代理同时运行。</strong>box、Clash 等会与 dae 争抢流量接管，请先停用。</p>
+        <p><strong>这是 debug 构建。</strong>使用调试签名，适合测试；正式签名将通过 CI 配置。</p>
+        <p><strong>关于下载。</strong>CDN 对大文件单次响应有限制，页面会按 1 MB 分块取回并合并成完整文件。若浏览器不支持，可尝试文件列表中的直链。</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    DaePilot · 本页只托管安装包，不提供任何代理服务。
+  </footer>
+
+</div>
+
+  <script id="chunk-hashes" type="application/json">{"apk":["62ec460629a413d10b23ad2154b32108beb681384ebff0f827543f45adc0627f","8064ab3eb421de4d54ef4ff9d2fb29d50c1ef4bc031e57466ffe144ecc3bfd39","149e627214d9702d1c45589959b8e3156a72f58dd36a1d209b9e97463079212f","a112de3b1778d4dd55fe643a60f42f4f96d93991c640e0864ba23b58b3ca57f9","38234456cf78cf7d52f8a40a3264f20cf722144df0f1d445b4ef2eef3c192c93","cb97181028b49892ffa47e07b587791ee2e505591ccd3a2fa7d273e22750c40f","fa4fec919003fcac91d103811d442c9de58a30fdc1f95165d42fd2360ad70dc5","313924dc8bc2770d7fb734c308e4ec224b20f02d77596e77df9cd3fec871bef5","7534f4026b6bfc3807b4331227ef5a8add258d322b3130fcf17d8d83298dab4b","c1b4709113ef89792f90acad5ec3f6049d5f3e52e4006de94f0469289e4f9672","5e5fa5e9c2f857ee33f7df53287d885d9952c24164da3b409cfea8edcac24579","02cdfd2948b46dc61412f0092da85b46f60fe5f8472bba316ffd5b859339fc41","c0690c35e8261a79f38556aa58200414fae96d006663885baca96eba46833ccf","1b321f7df31f10e2b48199b92ed38e98002ffe6ad742835caec2282a036fc809","90ca65b83140e933b15c22a87b39d0ebd6990441ab00e1cea52d4aafe95425b5","1562a56086310e214af83ce427e8b430cc22983f6735de1ebd75af7ebb21f837","325c12e26ac58c860b3954ef0059d4f0a5f7e7e548ad95876f5b303cd0a01d62","ef2c7a1cf3d7e592b70024ea9da1e86214a71b7455fafefa8e7f0ba5583e5fff","ceeb55a0411e5727952af2285cc7e6db1df6f79c4a6f1af150b2b9876c325812","b835a8fcb03d8b171c63ef3e043516d3e96689608c5c4544008d63db61f2b8d9","329fa6095c32041bbf1873320998314fec09f3cbcb0ce6aa9fd8f63b810f50a4","55abdb944511cd19eacae69f63fcc87ae6890021b5bdac1838f00d9bb301fc06","4d77e4f6731524891fd9fbc2debb25121f246ed300cfd032d2637ef0c45f2e10","0cd8aee1837d3dd2a7cb19e3d3fe4889ebefe0fec94a36c8615971c422334936","8736f9be1d3f806d198edfb391c390cee6126bde997d0ef88a50eaebd39be7ab","6e3edfc56677d876332990d34f0a0acfe775feb08002d3a8efce045c9bafa871","cf89867cbb3fc51d6f6c01a900b425b333aebf3e8533ebf49bd75606935810c7","4c9e76ec9d370404004acc2fbc54e54d4debf6657f27065d4063fb0e0de03c61","0fd9edf6923af213b70fcc725000fad3c109e0cabb6e7e0df65e2a9d5b699151","0d2826ee56c8cd4d33f239d6259e1b8fa601e7ea59050402e900473ff1e3d005","27e2426a3b18a2be98b35108297b8e6e5370d04fccc5160c06ef54eca70436da","e8345f2007c3d23ea7db39ef15ea27e87de7c2df49577ad5336f5833fd0fbe12","9090b41015331cc859a0199eb4e4b25c1d9a5965ea01f9b3cf04b7e7c79cba26","31efe2a19ec0bba776675fd7e80dfe25ddb265c676370682456825bc56393864"],"zip":["9a5adbc7f4cd363f85d1f39218857b321988465b8257145f7c93589be405b348","b1b4732b42d27436c334123ba119644c0e26289d6fe300a5770232b7fb4017a4","124a72fb0fa9e7fbbf4fe000d77d49843db5e55c28519c586656202443122f19","2d2892174a837fd0670f1df9f6820489dc2d39ba68683c468fd0c7fcec61c029","7f4cb164be3627250760a181f6b6db7453c733c6084a86f2300223e736c6db3e","d594df95c24603e215eb15022cbe170b052431ff2e53607373b31bcfcf2c4e45","943e470bc3c25f0fb4720be38ff11eea2334335b8d78967e233e36da615e7426","90f87c0b68d0e4374344c5914b33fc090fd61257eb02dc2626f14d8a28e8d996","a0bbe372741d1aba2518a961f65bf65aaae6eaf4050c5f7330dd629184ec4bec","95ceb1f81954fa50890b85f2a7ec86a1b682bc0ee788b85f7c901f3072a4e287","e0d9452e3a1af01b63b881ed5a6f57959517e673d7d3e28f231c714edb39f156","8fbab0c8224f96bf27bdf94ae78eabbdd8b3147b99f2f509486690702224ee27","6b5d32ccd27ae9576f3483e9d11930764ef8e16a60de34d6149521aa58e140bc","c294be59bb8552c2dee27b46db48e6cf11808a7d9273d3243d7068a4c8b0ae05","cd16682703d552e4168e2effb918d858d16162a6318fa72ed9eef301582bae13","e7b1f9896a24a23706ab084edfe80c732b7c5874469697b72cc1886f4be59289","dbac9d389c6fd8e628747f518c2307221d8f74b50e96f6f4be3a91da0a449bf3"]}</script>
+  <script>
+    (function () {
+      const CHUNK = 1024 * 1024;
+      const progress = document.getElementById('progress');
+      const bar = document.getElementById('progress-bar');
+      const label = document.getElementById('progress-text');
+      let busy = false;
+
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const manifest = JSON.parse(document.getElementById('chunk-hashes').textContent);
+
+      async function sha256(buf) {
+        if (!crypto.subtle) return '';
+        const digest = await crypto.subtle.digest('SHA-256', buf);
+        return Array.from(new Uint8Array(digest))
+          .map((b) => b.toString(16).padStart(2, '0')).join('');
+      }
+
+      async function fetchChunk(url, start, end, expected) {
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 30000);
+          try {
+            const bust = url + (url.indexOf('?') >= 0 ? '&' : '?') +
+              'c=' + start + '&a=' + attempt + '&t=' + Date.now();
+            const res = await fetch(bust, {
+              headers: { Range: 'bytes=' + start + '-' + end },
+              cache: 'no-store',
+              signal: controller.signal
+            });
+            if (res.status === 206) {
+              const buf = await res.arrayBuffer();
+              if (buf.byteLength !== end - start + 1) throw new Error('size');
+              if (expected) {
+                const got = await sha256(buf);
+                if (got && got !== expected) throw new Error('hash');
+              }
+              return buf;
+            }
+          } catch (e) {
+            /* retry */
+          } finally {
+            clearTimeout(timer);
+          }
+          await sleep(500 + attempt * 450);
+        }
+        throw new Error('数据块 ' + start + ' 下载失败');
+      }
+
+      async function download(link) {
+        if (busy) return;
+        busy = true;
+        const url = link.dataset.url;
+        const size = Number(link.dataset.size);
+        const name = link.dataset.name;
+        const buttons = document.querySelectorAll('.actions .button, a.chunk-link');
+        buttons.forEach((b) => b.classList.add('disabled'));
+        progress.hidden = false;
+        bar.style.width = '0%';
+        label.textContent = '准备下载 ' + name + '…';
+        try {
+          const chunks = [];
+          const expectedHashes = manifest[link.dataset.hashes] || [];
+          for (let start = 0; start < size; start += CHUNK) {
+            const end = Math.min(start + CHUNK, size) - 1;
+            const index = Math.floor(start / CHUNK);
+            chunks.push(await fetchChunk(url, start, end, expectedHashes[index]));
+            const done = Math.min(end + 1, size);
+            const percent = Math.floor((done / size) * 100);
+            bar.style.width = percent + '%';
+            label.textContent = '正在下载 ' + name + ' · ' + percent + '%';
+          }
+          const blob = new Blob(chunks, { type: 'application/octet-stream' });
+          const objectUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = objectUrl;
+          a.download = name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+          label.textContent = '下载完成 · ' + name;
+        } catch (e) {
+          label.textContent = '下载失败，请重试或使用直链。' + (e && e.message ? ' ' + e.message : '');
+        } finally {
+          busy = false;
+          buttons.forEach((b) => b.classList.remove('disabled'));
+        }
+      }
+
+      document.querySelectorAll('a[data-url]').forEach((link) => {
+        link.addEventListener('click', (event) => {
+          event.preventDefault();
+          download(link);
+        });
+      });
+    })();
+  </script>
+
+</body>
+</html>

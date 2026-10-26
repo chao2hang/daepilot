@@ -1,0 +1,287 @@
+#!/bin/sh
+# Host-side regression tests for magisk/payload/bin/daepilotctl.
+#
+# The control script targets Android (/system/bin/sh, toybox, chroot as root),
+# so the tests run it with plain `sh` under a fake PATH:
+#   - fake chroot execs <root><guest-path> directly (no real chroot, no root)
+#   - fake dae validates text configs, records which guest file was validated,
+#     can be told to fail `reload`, and stays "running" for lifecycle tests
+#   - fake ip / getprop provide deterministic routing and DNS-prop data
+#
+# Primary regression covered: ensure_geodata() used to leak the globals
+# src/dest into apply_config(), so `cp "$src" "$CONF"` copied geoip.dat over
+# config.dae (the 10/25-10/26 corruption). The harness re-derives the old
+# buggy script by deleting the `local` guard and asserts the corruption is
+# reproduced there and absent in the current script.
+set -u
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CTL_SRC="$ROOT_DIR/magisk/payload/bin/daepilotctl"
+WORK="$(mktemp -d)"
+FAILED=0
+DAEMON_PID=""
+
+cleanup() {
+  [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
+  for pf in "$WORK"/base/run/dae.host.pid "$WORK"/base/rootfs/run/dae.pid; do
+    [ -f "$pf" ] || continue
+    p="$(tr -dc '0-9' < "$pf" 2>/dev/null)"
+    [ -n "$p" ] && kill "$p" 2>/dev/null
+  done
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+pass() { printf 'PASS  %s\n' "$1"; }
+fail_test() { printf 'FAIL  %s\n' "$1"; FAILED=1; }
+
+assert_eq() {
+  if [ "$1" = "$2" ]; then pass "$3"; else fail_test "$3 (got [$1] want [$2])"; fi
+}
+
+assert_contains() {
+  if grep -qF -- "$2" "$1" 2>/dev/null; then pass "$3"; else fail_test "$3 (missing '$2' in $1)"; fi
+}
+
+assert_not_contains() {
+  if grep -qF -- "$2" "$1" 2>/dev/null; then fail_test "$3 (unexpected '$2' in $1)"; else pass "$3"; fi
+}
+
+assert_file_absent() {
+  if [ -e "$1" ]; then fail_test "$2 ($1 exists)"; else pass "$2"; fi
+}
+
+# --- fake tools -----------------------------------------------------------
+
+mkdir -p "$WORK/fakebin"
+
+cat > "$WORK/fakebin/chroot" <<'EOF'
+#!/bin/sh
+# chroot ROOT GUEST args... -> exec ROOT/GUEST args... (no privilege needed)
+root="$1"; guest="$2"; shift 2
+DAEPILOT_TEST_ROOT="$root"
+export DAEPILOT_TEST_ROOT
+exec "$root$guest" "$@"
+EOF
+
+cat > "$WORK/fakebin/busybox" <<'EOF'
+#!/bin/sh
+# busybox stub: the ctl prefers busybox when present, so fake the subcommands
+# the tests need (chroot/setsid) and fail loudly on anything else.
+cmd="$1"; shift
+case "$cmd" in
+  chroot)
+    root="$1"; guest="$2"; shift 2
+    DAEPILOT_TEST_ROOT="$root"
+    export DAEPILOT_TEST_ROOT
+    exec "$root$guest" "$@" ;;
+  setsid)
+    exec "$@" ;;
+  *)
+    echo "fake-busybox: unsupported subcommand: $cmd" >&2
+    exit 1 ;;
+esac
+EOF
+
+cat > "$WORK/fakebin/getprop" <<'EOF'
+#!/bin/sh
+# No DNS props -> ctl must fall back to its own nameserver list.
+exit 0
+EOF
+
+cat > "$WORK/fakebin/ip" <<'EOF'
+#!/bin/sh
+case "$1" in
+  rule)
+    case "$2" in
+      add) exit 0 ;;
+      del) exit 1 ;; # no rule present -> like real ip when the list is empty
+      *)
+        printf '0:\tfrom all lookup local\n'
+        printf '32766:\tfrom all lookup main\n'
+        printf '32767:\tfrom all lookup default\n'
+        ;;
+    esac ;;
+  route)
+    case "$*" in
+      *table\ main*) echo "default via 192.0.2.1 dev eth0" ;;
+      *) : ;;
+    esac ;;
+esac
+exit 0
+EOF
+
+chmod 755 "$WORK/fakebin/chroot" "$WORK/fakebin/busybox" "$WORK/fakebin/getprop" "$WORK/fakebin/ip"
+
+# --- per-test fixtures ----------------------------------------------------
+
+install_ctl() {
+  cp "$1" "$BASE/bin/daepilotctl"
+  chmod 755 "$BASE/bin/daepilotctl"
+}
+
+setup_base() { # $1 = ctl source to install
+  BASE="$WORK/base"
+  rm -rf "$BASE"
+  mkdir -p "$BASE/geo" "$BASE/staging" "$BASE/bin" "$BASE/config"
+  printf 'GEOSITE-BINARY\n' > "$BASE/geo/geosite.dat"
+  printf 'GEOIP-BINARY-MARKER\n' > "$BASE/geo/geoip.dat"
+
+  cat > "$BASE/bin/dae" <<'EOF'
+#!/bin/sh
+case "$1" in
+  validate)
+    file="$3"
+    [ -n "$DAEPILOT_TEST_ROOT" ] && file="$DAEPILOT_TEST_ROOT$file"
+    if [ ! -f "$file" ]; then echo "open $file: no such file"; exit 1; fi
+    if ! grep -q 'global {' "$file" 2>/dev/null; then
+      echo "token recognition error: invalid syntax"
+      exit 1
+    fi
+    printf '%s\n' "$file" >> "${DAEPILOT_TEST_LOG:?}"
+    exit 0 ;;
+  reload)
+    if [ -n "$DAEPILOT_TEST_FAIL_RELOAD" ]; then
+      echo "reload failed (test)"
+      exit 1
+    fi
+    exit 0 ;;
+  run)
+    echo "$$" > "${DAEPILOT_TEST_ROOT:?}/run/dae.pid" 2>/dev/null
+    exec "$DAEPILOT_TEST_ROOT/bin/dae-hold" ;;
+  *)
+    echo "fake-dae: unsupported: $*"
+    exit 1 ;;
+esac
+EOF
+
+  cat > "$BASE/bin/dae-hold" <<'EOF'
+#!/bin/sh
+trap 'exit 0' TERM
+while :; do sleep 5; done
+EOF
+
+  chmod 755 "$BASE/bin/dae" "$BASE/bin/dae-hold"
+  install_ctl "$1"
+  : > "$WORK/validated.log"
+  : > "$WORK/stderr.txt"
+}
+
+launch_daemon() {
+  mkdir -p "$BASE/rootfs/bin" "$BASE/rootfs/run" "$BASE/run"
+  cp "$BASE/bin/dae" "$BASE/rootfs/bin/dae"
+  cp "$BASE/bin/dae-hold" "$BASE/rootfs/bin/dae-hold"
+  chmod 755 "$BASE/rootfs/bin/dae" "$BASE/rootfs/bin/dae-hold"
+  # The fake dae writes its pid under DAEPILOT_TEST_ROOT, which the fake
+  # chroot normally provides; launch_daemon runs it directly, so export it.
+  DAEPILOT_TEST_ROOT="$BASE/rootfs" sh "$BASE/rootfs/bin/dae" run >/dev/null 2>&1 &
+  DAEMON_PID=$!
+  echo "$DAEMON_PID" > "$BASE/run/dae.host.pid"
+  i=0
+  while [ ! -s "$BASE/rootfs/run/dae.pid" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
+run_ctl() { # $@ = ctl args; stdout is the ctl stdout, stderr -> $WORK/stderr.txt
+  ( export PATH="$WORK/fakebin:$PATH"
+    export DAEPILOT_BASE="$BASE"
+    export DAEPILOT_TEST_ROOT="$BASE/rootfs"
+    export DAEPILOT_TEST_LOG="$WORK/validated.log"
+    export DAEPILOT_TEST_FAIL_RELOAD="${FAIL_RELOAD:-}"
+    sh "$CTL_UNDER_TEST" "$@" 2>"$WORK/stderr.txt"
+  )
+}
+
+CONF="$WORK/base/config/config.dae"
+BAK="$WORK/base/config/config.dae.bak"
+
+# ==========================================================================
+# 1. apply installs the staged text config, validates via <name>.dae guest
+#    path, and writes the DNS fallback list (no 1.1.1.1).
+# ==========================================================================
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf 'global {\n  log_level: info\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply succeeds"
+assert_contains "$CONF" "log_level" "config.dae contains staged config"
+assert_not_contains "$CONF" "GEOIP-BINARY-MARKER" "config.dae is not geoip data"
+assert_eq "$(tail -n 1 "$WORK/validated.log")" "$BASE/rootfs/config/config.validate.dae" \
+  "dae validated the .dae-suffixed guest file"
+assert_file_absent "$BASE/rootfs/config/config.validate.dae" "validate temp file removed"
+assert_contains "$BASE/rootfs/etc/resolv.conf" "119.29.29.29" "DNS fallback 119.29.29.29 present"
+assert_contains "$BASE/rootfs/etc/resolv.conf" "223.5.5.5" "DNS fallback 223.5.5.5 present"
+assert_not_contains "$BASE/rootfs/etc/resolv.conf" "1.1.1.1" "no unreachable 1.1.1.1 fallback"
+assert_file_absent "$BASE/run/last_error" "no last_error after successful apply"
+
+# 2. second apply backs up the previous good config (not polluted data).
+printf 'global {\n  log_level: debug\n  second: v2\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "second apply succeeds"
+assert_contains "$CONF" "second: v2" "config.dae updated to v2"
+assert_contains "$BAK" "log_level: info" "config.dae.bak holds previous good config"
+assert_not_contains "$BAK" "GEOIP-BINARY-MARKER" "config.dae.bak is not geoip data"
+
+# 3. validation failure surfaces dae's own output (app shows the reason).
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf 'this is not a dae config\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$([ "$rc" -eq 0 ] && echo ok || echo fail)" "fail" "bad config rejected"
+assert_contains "$WORK/stderr.txt" "配置校验失败：token recognition error" \
+  "stderr carries dae's real validation error"
+assert_contains "$BASE/run/last_error" "token recognition error" "last_error records dae's reason"
+assert_file_absent "$CONF" "bad config never reaches config.dae"
+
+# 4. hot-reload failure rolls back to a backup that still validates.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf 'global {\n  version: v1\n}\n' > "$CONF"
+launch_daemon
+FAIL_RELOAD=1
+printf 'global {\n  version: v2-broken\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae" --reload)"; rc=$?
+assert_eq "$([ "$rc" -eq 0 ] && echo ok || echo fail)" "fail" "failed hot reload rejected"
+assert_contains "$WORK/stderr.txt" "已回滚到上一版" "rollback message reported"
+assert_contains "$CONF" "version: v1" "config.dae rolled back to previous version"
+assert_not_contains "$CONF" "v2-broken" "broken config not kept"
+assert_contains "$BASE/rootfs/config/config.dae" "version: v1" "chroot config also rolled back"
+FAIL_RELOAD=""
+kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null; DAEMON_PID=""
+
+# 5. hot-reload failure with a polluted backup must NOT restore it
+#    (the historical state: config.dae and .bak both held geoip data).
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf 'GEOIP-BINARY-MARKER\n' > "$CONF"   # polluted main config, no backup yet
+launch_daemon
+FAIL_RELOAD=1
+printf 'global {\n  version: v2\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae" --reload)"; rc=$?
+assert_eq "$([ "$rc" -eq 0 ] && echo ok || echo fail)" "fail" "reload with polluted backup fails"
+assert_contains "$WORK/stderr.txt" "备份配置校验未通过" "polluted backup is refused"
+assert_contains "$CONF" "version: v2" "new config kept instead of restoring geoip"
+assert_not_contains "$CONF" "GEOIP-BINARY-MARKER" "geoip backup was not restored"
+FAIL_RELOAD=""
+kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null; DAEMON_PID=""
+
+# 6. harness reproduction of the historical bug: removing the `local` guard
+#    in ensure_geodata must make apply corrupt config.dae with geoip data.
+sed '/local name src dest a b/d' "$CTL_SRC" > "$WORK/ctl-buggy"
+setup_base "$WORK/ctl-buggy"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf 'global {\n  log_level: info\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "buggy ctl still exits 0 (as it did on device)"
+assert_contains "$CONF" "GEOIP-BINARY-MARKER" \
+  "harness reproduces the geoip-overwrites-config.dae bug"
+
+# ==========================================================================
+if [ "$FAILED" -eq 0 ]; then
+  echo "ALL TESTS PASSED"
+else
+  echo "SOME TESTS FAILED"
+fi
+exit "$FAILED"

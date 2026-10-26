@@ -1,0 +1,655 @@
+#!/system/bin/sh
+# DaePilot data-plane controller.
+#
+# All daemon lifecycle operations live here so the app, the boot service and
+# the watchdog share one implementation. dae runs inside a chroot under
+# /data/adb/daepilot/rootfs, detached from the calling (app) process.
+#
+# Commands: start stop restart reload enable disable apply validate status logs
+#           clearlog diagnose watch
+
+BASE="${DAEPILOT_BASE:-/data/adb/daepilot}"
+ROOTFS="$BASE/rootfs"
+DAE="$BASE/bin/dae"
+CTL="$BASE/bin/daepilotctl"
+GEO_DIR="$BASE/geo"
+CONF_DIR="$BASE/config"
+CONF="$CONF_DIR/config.dae"
+BAK="$CONF_DIR/config.dae.bak"
+VALIDATE_CONF_GUEST="/config/config.validate.dae"
+VALIDATE_CONF="$ROOTFS$VALIDATE_CONF_GUEST"
+DAE_MARK_RULE_PRIORITY=9900
+DAE_MARK_LEGACY_PRIORITY=14000
+STAGING="$BASE/staging"
+RUN="$BASE/run"
+LOG="$BASE/logs/dae.log"
+WLOG="$BASE/logs/watchdog.log"
+HOST_PID="$RUN/dae.host.pid"
+DAE_PID="$ROOTFS/run/dae.pid"
+WATCH_PID="$RUN/watchdog.pid"
+ENABLED="$BASE/enabled"
+BOOT_ENABLED="$BASE/boot_enabled"
+VERSION_FILE="$BASE/bin/VERSION"
+CONFIG_OK="$RUN/config.ok"
+LAST_ERROR="$RUN/last_error"
+
+BB=""
+for candidate in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /system/xbin/busybox; do
+  if [ -x "$candidate" ]; then BB="$candidate"; break; fi
+done
+if [ -z "$BB" ] && command -v busybox >/dev/null 2>&1; then
+  BB="$(command -v busybox)"
+fi
+
+say() { echo "$*"; }
+fail() { echo "$*" >&2; set_error "$*"; return 1; }
+
+set_error() {
+  mkdir -p "$RUN" 2>/dev/null
+  printf '%s\n' "$1" > "$LAST_ERROR" 2>/dev/null
+}
+
+clear_error() { rm -f "$LAST_ERROR" 2>/dev/null; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_layout() {
+  mkdir -p "$BASE/bin" "$CONF_DIR" "$STAGING" "$RUN" "$BASE/logs" 2>/dev/null
+  mkdir -p "$ROOTFS/bin" "$ROOTFS/config" "$ROOTFS/run" "$ROOTFS/proc" \
+    "$ROOTFS/sys/class" "$ROOTFS/sys/devices" "$ROOTFS/sys/fs/cgroup" \
+    "$ROOTFS/sys/fs/bpf" "$ROOTFS/sys/kernel/btf" "$ROOTFS/dev" \
+    "$ROOTFS/etc/ssl/certs" "$ROOTFS/tmp" "$ROOTFS/var" "$ROOTFS/root" 2>/dev/null
+  chmod 700 "$BASE" "$CONF_DIR" 2>/dev/null
+  chmod 755 "$ROOTFS" "$ROOTFS/bin" "$ROOTFS/run" "$ROOTFS/etc" "$ROOTFS/var" 2>/dev/null
+  chmod 1777 "$ROOTFS/tmp" 2>/dev/null
+  if [ ! -L "$ROOTFS/var/run" ]; then
+    rm -rf "$ROOTFS/var/run" 2>/dev/null
+    ln -s ../run "$ROOTFS/var/run" 2>/dev/null
+  fi
+  [ -f "$LOG" ] || : > "$LOG"
+  [ -f "$WLOG" ] || : > "$WLOG"
+}
+
+is_mounted() {
+  grep -q " $1 " /proc/mounts 2>/dev/null
+}
+
+ensure_mounts() {
+  ensure_layout
+
+  if ! is_mounted "$ROOTFS/proc"; then
+    mount -t proc proc "$ROOTFS/proc" 2>/dev/null || true
+  fi
+  if ! is_mounted "$ROOTFS/dev"; then
+    mount --rbind /dev "$ROOTFS/dev" 2>/dev/null || mount -o bind /dev "$ROOTFS/dev" 2>/dev/null || true
+  fi
+  # Mount only the sysfs subtrees dae actually reads. Binding all of /sys would
+  # hide our pre-created /sys/fs/bpf mount point on devices where the host does
+  # not have bpffs mounted yet.
+  if [ -d /sys/class ] && ! is_mounted "$ROOTFS/sys/class"; then
+    mount --rbind /sys/class "$ROOTFS/sys/class" 2>/dev/null || true
+  fi
+  if [ -d /sys/devices ] && ! is_mounted "$ROOTFS/sys/devices"; then
+    mount --rbind /sys/devices "$ROOTFS/sys/devices" 2>/dev/null || true
+  fi
+  if [ -d /sys/kernel/btf ] && ! is_mounted "$ROOTFS/sys/kernel/btf"; then
+    mount --rbind /sys/kernel/btf "$ROOTFS/sys/kernel/btf" 2>/dev/null || true
+  fi
+  # cgroup2 is needed for dae's cgroup connect hooks.
+  if [ -d /sys/fs/cgroup ] && ! is_mounted "$ROOTFS/sys/fs/cgroup"; then
+    mount --rbind /sys/fs/cgroup "$ROOTFS/sys/fs/cgroup" 2>/dev/null || true
+  fi
+  # Writable /run (netns state, pid/progress files).
+  if ! is_mounted "$ROOTFS/run"; then
+    mount -t tmpfs -o mode=0755,size=16m tmpfs "$ROOTFS/run" 2>/dev/null || true
+  fi
+  if ! is_mounted "$ROOTFS/sys/fs/bpf"; then
+    mount -t bpf bpf "$ROOTFS/sys/fs/bpf" 2>/dev/null || \
+      mount --rbind /sys/fs/bpf "$ROOTFS/sys/fs/bpf" 2>/dev/null || true
+  fi
+}
+
+cleanup_mounts() {
+  # Unmount only paths under our rootfs; host mounts are never touched.
+  for path in "$ROOTFS/sys/fs/bpf" "$ROOTFS/sys/fs/cgroup" \
+              "$ROOTFS/sys/kernel/btf" "$ROOTFS/sys/class" "$ROOTFS/sys/devices" \
+              "$ROOTFS/run" "$ROOTFS/dev" "$ROOTFS/proc"; do
+    if is_mounted "$path"; then
+      umount -l "$path" 2>/dev/null || umount "$path" 2>/dev/null || true
+    fi
+  done
+}
+
+write_resolv() {
+  mkdir -p "$ROOTFS/etc" 2>/dev/null
+  tmp="$ROOTFS/etc/resolv.conf.new"
+  : > "$tmp"
+  for prop in net.dns1 net.dns2 net.dns3 net.dns4; do
+    dns="$(getprop "$prop" 2>/dev/null | tr -d ' ')"
+    case "$dns" in
+      ""|"0.0.0.0"|"::"|"::1"|"127.0.0.1") ;;
+      *) echo "nameserver $dns" >> "$tmp" ;;
+    esac
+  done
+  if [ ! -s "$tmp" ]; then
+    # 119.29.29.29 (DNSPod) is reachable on networks where public UDP/53
+    # resolvers such as 1.1.1.1 are blocked.
+    echo "nameserver 119.29.29.29" >> "$tmp"
+    echo "nameserver 223.5.5.5" >> "$tmp"
+  fi
+  mv "$tmp" "$ROOTFS/etc/resolv.conf" 2>/dev/null
+  chmod 644 "$ROOTFS/etc/resolv.conf" 2>/dev/null
+
+  if [ -f /system/etc/hosts ]; then
+    cp /system/etc/hosts "$ROOTFS/etc/hosts" 2>/dev/null
+  else
+    echo "127.0.0.1 localhost" > "$ROOTFS/etc/hosts"
+  fi
+  chmod 644 "$ROOTFS/etc/hosts" 2>/dev/null
+
+  echo "root:x:0:0:root:/root:/bin/sh" > "$ROOTFS/etc/passwd"
+  echo "root:x:0:" > "$ROOTFS/etc/group"
+  chmod 644 "$ROOTFS/etc/passwd" "$ROOTFS/etc/group" 2>/dev/null
+}
+
+write_ca_bundle() {
+  bundle="$ROOTFS/etc/ssl/certs/ca-certificates.crt"
+  mkdir -p "$ROOTFS/etc/ssl/certs" 2>/dev/null
+  : > "$bundle"
+  for dir in /apex/com.android.conscrypt/cacerts /system/etc/security/cacerts /data/misc/user/0/cacerts-added; do
+    [ -d "$dir" ] || continue
+    for cert in "$dir"/*.0 "$dir"/*.pem; do
+      [ -f "$cert" ] || continue
+      cat "$cert" >> "$bundle" 2>/dev/null || true
+    done
+  done
+  if [ ! -s "$bundle" ]; then
+    rm -f "$bundle" 2>/dev/null
+  else
+    chmod 644 "$bundle" 2>/dev/null
+  fi
+}
+
+prepare_chroot() {
+  write_resolv
+  write_ca_bundle
+  # Keep the static binary inside the chroot; dae is not dynamically linked,
+  # but this also makes the path stable for `dae validate` and `dae reload`.
+  if [ -x "$DAE" ]; then
+    if [ ! -f "$ROOTFS/bin/dae" ] || ! cmp -s "$DAE" "$ROOTFS/bin/dae"; then
+      cp "$DAE" "$ROOTFS/bin/dae" 2>/dev/null || cp "$DAE" "$ROOTFS/bin/dae"
+      chmod 755 "$ROOTFS/bin/dae" 2>/dev/null
+    fi
+  fi
+  if [ -f "$CONF" ]; then
+    cp "$CONF" "$ROOTFS/config/config.dae" 2>/dev/null
+    chmod 600 "$ROOTFS/config/config.dae" 2>/dev/null
+  fi
+  ensure_geodata || return 1
+  chmod 700 "$ROOTFS/config" 2>/dev/null
+}
+
+# dae looks for geosite.dat/geoip.dat next to the config file. The copies are
+# large, so only replace them when the size differs (upgrade/repair).
+ensure_geodata() {
+  # Do not leak src/dest into callers such as apply_config: this loop used to
+  # overwrite apply_config's staged config path with geoip.dat.
+  local name src dest a b
+  mkdir -p "$ROOTFS/config" 2>/dev/null
+  for name in geosite.dat geoip.dat; do
+    src="$GEO_DIR/$name"
+    dest="$ROOTFS/config/$name"
+    if [ -f "$dest" ] && [ -f "$src" ]; then
+      a="$(wc -c < "$dest" 2>/dev/null | tr -dc '0-9')"
+      b="$(wc -c < "$src" 2>/dev/null | tr -dc '0-9')"
+      [ -n "$a" ] && [ "$a" = "$b" ] && continue
+    fi
+    if [ -f "$src" ]; then
+      cp "$src" "$dest" 2>/dev/null || { fail "无法安装地理数据：$name"; return 1; }
+      chmod 644 "$dest" 2>/dev/null
+    elif [ ! -f "$dest" ]; then
+      fail "缺少地理数据 $name，请重新安装 DaePilot 模块"
+      return 1
+    fi
+  done
+  return 0
+}
+
+run_chroot() {
+  if [ -n "$BB" ]; then
+    "$BB" chroot "$ROOTFS" "$@"
+  else
+    chroot "$ROOTFS" "$@"
+  fi
+}
+
+daemon_pid() {
+  pid=""
+  if [ -f "$DAE_PID" ]; then
+    pid="$(cat "$DAE_PID" 2>/dev/null | tr -dc '0-9')"
+  fi
+  if [ -z "$pid" ] && [ -f "$HOST_PID" ]; then
+    pid="$(cat "$HOST_PID" 2>/dev/null | tr -dc '0-9')"
+  fi
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [ -r "/proc/$pid/status" ] && grep -qE '^State:[[:space:]]*Z' "/proc/$pid/status"; then
+    return 1
+  fi
+  if [ -r "/proc/$pid/cmdline" ]; then
+    cmd="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+    case "$cmd" in
+      *dae*) echo "$pid"; return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  echo "$pid"
+  return 0
+}
+
+is_running() { daemon_pid >/dev/null 2>&1; }
+
+rotate_log() {
+  size=0
+  [ -f "$LOG" ] && size="$(wc -c < "$LOG" 2>/dev/null | tr -dc '0-9')"
+  [ -n "$size" ] || size=0
+  if [ "$size" -gt 5242880 ]; then
+    mv "$LOG" "$LOG.1" 2>/dev/null
+    : > "$LOG"
+  fi
+}
+
+remove_dae_route() {
+  local priority
+  if have ip; then
+    # Remove the current and formerly used reserved priorities so upgrades
+    # migrate the rule to 9900 instead of leaving a stale duplicate behind.
+    for priority in "$DAE_MARK_RULE_PRIORITY" "$DAE_MARK_LEGACY_PRIORITY"; do
+      while ip rule del priority "$priority" 2>/dev/null; do :; done
+    done
+  fi
+}
+
+ensure_dae_route() {
+  have ip || { fail "找不到 ip 命令，无法配置 dae socket 路由"; return 1; }
+
+  selected_table=""
+  for table in $(ip rule 2>/dev/null | sed -n 's/.* lookup \([^ ]*\).*/\1/p'); do
+    case "$table" in
+      ""|dummy0|*[!A-Za-z0-9_.-]*) continue ;;
+    esac
+    route="$(ip route show table "$table" 2>/dev/null | grep -m 1 '^default')"
+    [ -n "$route" ] || continue
+    case "$route" in
+      *" dev dummy0"*|*" dev lo"*|*blackhole*|*unreachable*|*prohibit*|*throw*) continue ;;
+    esac
+    selected_table="$table"
+    break
+  done
+
+  [ -n "$selected_table" ] || {
+    fail "未找到可供 dae 使用的默认路由（已排除 dummy0/黑洞路由）"
+    return 1
+  }
+
+  # Replace the reserved rule only after a usable table has been identified.
+  remove_dae_route
+  if ! ip rule add from all fwmark 0x100/0x1ffff table "$selected_table" priority "$DAE_MARK_RULE_PRIORITY" 2>/dev/null; then
+    fail "无法添加 dae socket 路由规则（priority $DAE_MARK_RULE_PRIORITY, table $selected_table）"
+    return 1
+  fi
+  return 0
+}
+
+validate_file() {
+  file="$1"
+  [ -f "$file" ] || { fail "配置文件不存在：$file"; return 1; }
+  ensure_mounts
+  prepare_chroot || return 1
+  mkdir -p "$ROOTFS/config" 2>/dev/null
+  cp "$file" "$VALIDATE_CONF" 2>/dev/null || { fail "无法写入校验配置"; return 1; }
+  chmod 600 "$VALIDATE_CONF" 2>/dev/null
+  out="$(run_chroot /bin/dae validate -c "$VALIDATE_CONF_GUEST" 2>&1)"
+  code=$?
+  rm -f "$VALIDATE_CONF" 2>/dev/null
+  if [ "$code" -ne 0 ]; then
+    rotate_log
+    {
+      printf '\n=== %s config validation failed ===\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+      printf '%s\n' "$out"
+    } >> "$LOG" 2>/dev/null
+    # Surface dae's first meaningful output line in the error so the app event
+    # log shows the real reason (e.g. "invalid config filename") instead of a
+    # bare message; the complete output stays in the local daemon log.
+    detail="$(printf '%s\n' "$out" | grep -m 1 . 2>/dev/null || true)"
+    case "$detail" in
+      "") fail "配置校验失败" ;;
+      *) fail "配置校验失败：$detail" ;;
+    esac
+    return 1
+  fi
+  clear_error
+  [ -n "$out" ] && say "$out"
+  return 0
+}
+
+start_daemon() {
+  ensure_layout
+  [ -x "$DAE" ] || { fail "dae 二进制缺失：$DAE"; return 1; }
+  [ -x "$CTL" ] || { fail "控制脚本缺失：$CTL"; return 1; }
+  if is_running; then
+    say "already running (pid $(daemon_pid))"
+    return 0
+  fi
+  # Recover a fwmark rule left behind by a crash/reboot before revalidating.
+  remove_dae_route
+  [ -f "$CONF" ] || { fail "尚未生成配置，请先在 App 中应用配置"; return 1; }
+
+  ensure_mounts
+  prepare_chroot || return 1
+  validate_file "$CONF" || return 1
+  echo "config_valid=1" > "$CONFIG_OK"
+
+  # dae marks its own sockets 0x100 to avoid self-capture. Android policy
+  # routing needs an explicit lookup for that mark, otherwise the socket may
+  # hit a terminal unreachable rule before reaching the network.
+  ensure_dae_route || return 1
+
+  rotate_log
+  rm -f "$DAE_PID" "$HOST_PID" 2>/dev/null
+  say "starting dae (chroot $ROOTFS)"
+  printf '\n=== %s start ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG"
+
+  if [ -n "$BB" ]; then
+    "$BB" setsid "$BB" chroot "$ROOTFS" /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp >> "$LOG" 2>&1 &
+  elif have setsid; then
+    setsid chroot "$ROOTFS" /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp >> "$LOG" 2>&1 &
+  else
+    chroot "$ROOTFS" /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp >> "$LOG" 2>&1 &
+  fi
+  launched=$!
+  echo "$launched" > "$HOST_PID"
+
+  # dae writes /var/run/dae.pid inside the chroot; prefer that pid because
+  # setsid may fork and make $! the parent that exits immediately.
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if is_running; then
+      pid="$(daemon_pid)"
+      echo "$pid" > "$HOST_PID"
+      sleep 1
+      if is_running; then
+        clear_error
+        say "running (pid $pid)"
+        return 0
+      fi
+      break
+    fi
+    sleep 0.5 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+
+  tail -n 20 "$LOG" 2>/dev/null >&2
+  remove_dae_route
+  fail "dae 启动失败，请查看日志"
+  return 1
+}
+
+stop_daemon() {
+  pid="$(daemon_pid 2>/dev/null)"
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null
+    i=0
+    while [ "$i" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 0.5 2>/dev/null || sleep 1
+      i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null
+    fi
+    say "stopped (pid $pid)"
+  else
+    say "not running"
+  fi
+  rm -f "$DAE_PID" "$HOST_PID" 2>/dev/null
+  remove_dae_route
+  cleanup_mounts
+}
+
+do_reload() {
+  if ! is_running; then
+    fail "dae 未运行，无法热重载"
+    return 1
+  fi
+  ensure_mounts
+  prepare_chroot || return 1
+  ensure_dae_route || return 1
+  if [ -n "$BB" ] && have timeout; then
+    out="$(timeout 90 "$BB" chroot "$ROOTFS" /bin/dae reload 2>&1)"
+  elif [ -n "$BB" ]; then
+    out="$("$BB" chroot "$ROOTFS" /bin/dae reload 2>&1)"
+  elif have timeout; then
+    out="$(timeout 90 chroot "$ROOTFS" /bin/dae reload 2>&1)"
+  else
+    out="$(chroot "$ROOTFS" /bin/dae reload 2>&1)"
+  fi
+  code=$?
+  printf '%s\n' "$out"
+  if [ "$code" -ne 0 ]; then
+    set_error "热重载失败：$out"
+    return 1
+  fi
+  clear_error
+  return 0
+}
+
+apply_config() {
+  src="$1"
+  do_reload_flag="$2"
+  [ -f "$src" ] || { fail "暂存配置不存在：$src"; return 1; }
+  validate_file "$src" || return 1
+
+  mkdir -p "$CONF_DIR" 2>/dev/null
+  if [ -f "$CONF" ]; then
+    cp "$CONF" "$BAK" 2>/dev/null
+    chmod 600 "$BAK" 2>/dev/null
+  fi
+  cp "$src" "$CONF" 2>/dev/null || { fail "无法写入配置"; return 1; }
+  chmod 600 "$CONF" 2>/dev/null
+  cp "$CONF" "$ROOTFS/config/config.dae" 2>/dev/null
+  chmod 600 "$ROOTFS/config/config.dae" 2>/dev/null
+
+  if [ "$do_reload_flag" = "--reload" ] && is_running; then
+    if do_reload; then
+      echo "config_valid=1" > "$CONFIG_OK"
+      say "配置已应用并热重载"
+      return 0
+    fi
+    # Only restore a backup that still validates. A polluted main config may
+    # have been backed up previously (e.g. the geoip.dat overwrite caused by
+    # variable leakage in old ctl versions); blindly restoring it would keep
+    # the daemon dead with a broken config.
+    if [ -f "$BAK" ] && validate_file "$BAK"; then
+      say "热重载失败，回滚并重启 daemon"
+      cp "$BAK" "$CONF" 2>/dev/null
+      cp "$BAK" "$ROOTFS/config/config.dae" 2>/dev/null
+      stop_daemon
+      start_daemon
+      fail "新配置热重载失败，已回滚到上一版"
+      return 1
+    fi
+    stop_daemon
+    fail "新配置热重载失败，且备份配置校验未通过，未执行回滚"
+    return 1
+  fi
+  echo "config_valid=1" > "$CONFIG_OK"
+  say "配置已写入（daemon 未运行或未请求重载）"
+  return 0
+}
+
+ensure_watchdog() {
+  pid=""
+  [ -f "$WATCH_PID" ] && pid="$(cat "$WATCH_PID" 2>/dev/null | tr -dc '0-9')"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && \
+     tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'daepilotctl'; then
+    return 0
+  fi
+  mkdir -p "$RUN" 2>/dev/null
+  if [ -n "$BB" ]; then
+    "$BB" setsid "$CTL" watch >> "$WLOG" 2>&1 &
+  elif have setsid; then
+    setsid "$CTL" watch >> "$WLOG" 2>&1 &
+  else
+    nohup "$CTL" watch >> "$WLOG" 2>&1 &
+  fi
+  say "watchdog started"
+}
+
+watch_loop() {
+  mkdir -p "$RUN" 2>/dev/null
+  echo $$ > "$WATCH_PID"
+  trap 'rm -f "$WATCH_PID" 2>/dev/null; exit 0' TERM INT HUP
+  say "watchdog $$ started"
+  while [ -f "$ENABLED" ]; do
+    if ! is_running; then
+      rotate_watch_log
+      say "[$(date '+%Y-%m-%d %H:%M:%S')] daemon down, restarting"
+      start_daemon >> "$WLOG" 2>&1
+    fi
+    sleep 15
+  done
+  say "watchdog $$ exiting (disabled)"
+  rm -f "$WATCH_PID" 2>/dev/null
+}
+
+rotate_watch_log() {
+  size=0
+  [ -f "$WLOG" ] && size="$(wc -c < "$WLOG" 2>/dev/null | tr -dc '0-9')"
+  [ -n "$size" ] || size=0
+  if [ "$size" -gt 1048576 ]; then
+    mv "$WLOG" "$WLOG.1" 2>/dev/null
+    : > "$WLOG"
+  fi
+}
+
+status() {
+  pid="$(daemon_pid 2>/dev/null)"
+  if [ -n "$pid" ]; then
+    echo "running=1"
+    echo "pid=$pid"
+    uptime=0
+    if [ -r "/proc/$pid/stat" ] && [ -r /proc/stat ]; then
+      ticks="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)"
+      btime="$(awk '/^btime/ {print $2}' /proc/stat 2>/dev/null)"
+      now="$(date +%s 2>/dev/null)"
+      case "$ticks" in ''|*[!0-9]*) ticks=0 ;; esac
+      case "$btime" in ''|*[!0-9]*) btime=0 ;; esac
+      case "$now" in ''|*[!0-9]*) now=0 ;; esac
+      if [ "$btime" -gt 0 ] && [ "$now" -ge "$btime" ]; then
+        uptime=$((now - btime - ticks / 100))
+        [ "$uptime" -lt 0 ] && uptime=0
+      fi
+    fi
+    echo "uptime=$uptime"
+    rss="$(awk '/^VmRSS:/ {print $2}' "/proc/$pid/status" 2>/dev/null)"
+    echo "rss_kb=${rss:-0}"
+  else
+    echo "running=0"
+  fi
+  [ -f "$ENABLED" ] && echo "enabled=1" || echo "enabled=0"
+  [ -f "$BOOT_ENABLED" ] && echo "boot_enabled=1" || echo "boot_enabled=0"
+  [ -s "$CONFIG_OK" ] && echo "config_valid=1" || echo "config_valid=0"
+  if [ -f "$WATCH_PID" ]; then
+    wpid="$(cat "$WATCH_PID" 2>/dev/null | tr -dc '0-9')"
+    if [ -n "$wpid" ] && kill -0 "$wpid" 2>/dev/null; then
+      echo "watchdog=1"
+    else
+      echo "watchdog=0"
+    fi
+  else
+    echo "watchdog=0"
+  fi
+  if [ -f "$VERSION_FILE" ]; then
+    echo "version=$(head -n 1 "$VERSION_FILE" 2>/dev/null)"
+  fi
+  if [ -f "$LAST_ERROR" ]; then
+    echo "last_error=$(head -n 1 "$LAST_ERROR" 2>/dev/null)"
+  fi
+  echo "mode=chroot"
+}
+
+diagnose() {
+  echo "kernel=$(uname -r 2>/dev/null)"
+  [ -e /sys/kernel/btf/vmlinux ] && echo "btf=1" || echo "btf=0"
+  grep -q cgroup2 /proc/mounts 2>/dev/null && echo "cgroup2=1" || echo "cgroup2=0"
+  echo "selinux=$(getenforce 2>/dev/null || echo Unknown)"
+  echo "mem_available_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null)"
+  [ -d /data/adb/modules/daepilot ] && echo "module=1" || echo "module=0"
+  [ -x "$DAE" ] && echo "dae=1" || echo "dae=0"
+  [ -f "$CONF" ] && echo "config=1" || echo "config=0"
+  echo "conflicts=$(ps -A -o NAME= 2>/dev/null | grep -cE '^(sing-box|clash|mihomo|xray|v2ray|hysteria)$')"
+}
+
+case "${1:-status}" in
+  start)
+    touch "$ENABLED" 2>/dev/null
+    start_daemon || exit 1
+    ensure_watchdog
+    ;;
+  stop)
+    rm -f "$ENABLED" 2>/dev/null
+    stop_daemon
+    pid=""
+    [ -f "$WATCH_PID" ] && pid="$(cat "$WATCH_PID" 2>/dev/null | tr -dc '0-9')"
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null
+      rm -f "$WATCH_PID" 2>/dev/null
+    fi
+    ;;
+  restart)
+    touch "$ENABLED" 2>/dev/null
+    stop_daemon
+    start_daemon || exit 1
+    ensure_watchdog
+    ;;
+  reload)
+    do_reload
+    ;;
+  enable)
+    touch "$BOOT_ENABLED"
+    say "boot start enabled"
+    ;;
+  disable)
+    rm -f "$BOOT_ENABLED"
+    say "boot start disabled"
+    ;;
+  apply)
+    apply_config "$2" "$3"
+    ;;
+  validate)
+    validate_file "${2:-$CONF}"
+    ;;
+  status)
+    status
+    ;;
+  logs)
+    lines="${2:-300}"
+    case "$lines" in ''|*[!0-9]*) lines=300 ;; esac
+    [ "$lines" -gt 5000 ] && lines=5000
+    tail -n "$lines" "$LOG" 2>/dev/null
+    ;;
+  clearlog)
+    : > "$LOG" 2>/dev/null
+    say "log cleared"
+    ;;
+  diagnose)
+    diagnose
+    ;;
+  watch)
+    watch_loop
+    ;;
+  *)
+    say "usage: $0 {start|stop|restart|reload|enable|disable|apply <file> [--reload]|validate [file]|status|logs [n]|clearlog|diagnose|watch}"
+    exit 2
+    ;;
+esac

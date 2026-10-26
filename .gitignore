@@ -1,0 +1,18 @@
+# Built application packages and intermediate build outputs
+.gradle/
+build/
+*/build/
+app/build/
+.kotlin/
+
+# Android Studio and local configuration
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# Temporary and log files
+*.log
+dist/logs/
+dist/daepilot-module.zip
+dist/site/dl/

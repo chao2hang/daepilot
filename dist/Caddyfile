@@ -1,0 +1,29 @@
+{
+	admin off
+	auto_https off
+}
+
+http://:9900 {
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:9901
+	}
+
+	handle {
+		root * /home/chaos/projects/daepilot/dist/site
+
+		@html path / /index.html
+		header @html Cache-Control "no-cache"
+
+		@apk path /dl/*/*.apk.txt
+		header @apk Content-Type "application/vnd.android.package-archive"
+		header @apk Content-Disposition "attachment; filename=DaePilot-0.3.2-debug.apk"
+
+		@zip path /dl/*/*.zip.txt
+		header @zip Content-Type "application/zip"
+		header @zip Content-Disposition "attachment; filename=daepilot-module.zip"
+
+		file_server
+	}
+}
