@@ -17,6 +17,7 @@ object DaePaths {
     const val WATCHDOG_LOG = "$LOG_DIR/watchdog.log"
     const val RUN = "$BASE/run"
     const val PID = "$RUN/dae.pid"
+    const val DNS_SERVERS = "$RUN/dns.servers"
     const val WATCHDOG_PID = "$RUN/watchdog.pid"
     const val ENABLED = "$BASE/enabled"
     const val VERSION = "$BASE/bin/VERSION"

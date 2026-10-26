@@ -67,7 +67,7 @@ EOF
 cat > "$WORK/fakebin/busybox" <<'EOF'
 #!/bin/sh
 # busybox stub: the ctl prefers busybox when present, so fake the subcommands
-# the tests need (chroot/setsid) and fail loudly on anything else.
+# the tests need (chroot/setsid/unshare/mount) and fail loudly on anything else.
 cmd="$1"; shift
 case "$cmd" in
   chroot)
@@ -77,6 +77,27 @@ case "$cmd" in
     exec "$root$guest" "$@" ;;
   setsid)
     exec "$@" ;;
+  unshare)
+    # Drop the only flag the ctl uses; run the re-executed ctl directly.
+    [ "$1" = "-m" ] && shift
+    prog="$1"; shift
+    # The ctl's shebang is /system/bin/sh, which does not exist on the host.
+    # Pretend the new namespace's root is private (see the awk stub).
+    DAEPILOT_TEST_PRIVATE_NS=1
+    export DAEPILOT_TEST_PRIVATE_NS
+    exec sh "$prog" "$@" ;;
+  awk)
+    # ns_root_is_private() asks for the mountinfo line of "/". The test host's
+    # root is shared, so synthesize a private line inside the fake namespace.
+    if [ "${DAEPILOT_TEST_PRIVATE_NS:-0}" = "1" ] && [ "$1" = '$5 == "/" { print; exit }' ]; then
+      echo "1 0 0:1 / / rw,relatime - ext4 /dev/root rw"
+      exit 0
+    fi
+    exec awk "$@" ;;
+  mount)
+    # Tests are not privileged enough for real mounts; the namespace logic is
+    # asserted structurally instead.
+    exit 0 ;;
   *)
     echo "fake-busybox: unsupported subcommand: $cmd" >&2
     exit 1 ;;
@@ -91,15 +112,21 @@ EOF
 
 cat > "$WORK/fakebin/ip" <<'EOF'
 #!/bin/sh
+family=""
+case "$1" in
+  -4|-6) family="$1"; shift ;;
+esac
 case "$1" in
   rule)
     case "$2" in
       add) exit 0 ;;
       del) exit 1 ;; # no rule present -> like real ip when the list is empty
       *)
-        printf '0:\tfrom all lookup local\n'
-        printf '32766:\tfrom all lookup main\n'
-        printf '32767:\tfrom all lookup default\n'
+        if [ "$family" != "-6" ]; then
+          printf '0:\tfrom all lookup local\n'
+          printf '32766:\tfrom all lookup main\n'
+          printf '32767:\tfrom all lookup default\n'
+        fi
         ;;
     esac ;;
   route)
@@ -107,11 +134,30 @@ case "$1" in
       *table\ main*) echo "default via 192.0.2.1 dev eth0" ;;
       *) : ;;
     esac ;;
+  link)
+    case "$*" in *eth0*) echo "2: eth0: <UP,LOWER_UP> mtu 1500 state UP mode DEFAULT" ;; esac ;;
+  addr)
+    if [ "$family" = "-4" ]; then
+      case "$*" in *eth0*) echo "    inet 192.0.2.2/24 scope global eth0" ;; esac
+    fi ;;
 esac
 exit 0
 EOF
 
-chmod 755 "$WORK/fakebin/chroot" "$WORK/fakebin/busybox" "$WORK/fakebin/getprop" "$WORK/fakebin/ip"
+cat > "$WORK/fakebin/mount" <<'EOF'
+#!/bin/sh
+# Never let the host-side tests create real bind mounts under $WORK.
+exit 0
+EOF
+
+cat > "$WORK/fakebin/mountpoint" <<'EOF'
+#!/bin/sh
+# Nothing is mounted in the hermetic test tree.
+exit 1
+EOF
+
+chmod 755 "$WORK/fakebin/chroot" "$WORK/fakebin/busybox" "$WORK/fakebin/getprop" \
+  "$WORK/fakebin/ip" "$WORK/fakebin/mount" "$WORK/fakebin/mountpoint"
 
 # --- per-test fixtures ----------------------------------------------------
 
@@ -148,7 +194,10 @@ case "$1" in
     exit 0 ;;
   run)
     echo "$$" > "${DAEPILOT_TEST_ROOT:?}/run/dae.pid" 2>/dev/null
-    exec "$DAEPILOT_TEST_ROOT/bin/dae-hold" ;;
+    # Keep "run -c /config/config.dae" in the process cmdline; is_our_dae()
+    # deliberately checks it so a stale or unrelated dae is not adopted.
+    trap 'exit 0' TERM
+    while :; do sleep 5; done ;;
   *)
     echo "fake-dae: unsupported: $*"
     exit 1 ;;
@@ -174,7 +223,7 @@ launch_daemon() {
   chmod 755 "$BASE/rootfs/bin/dae" "$BASE/rootfs/bin/dae-hold"
   # The fake dae writes its pid under DAEPILOT_TEST_ROOT, which the fake
   # chroot normally provides; launch_daemon runs it directly, so export it.
-  DAEPILOT_TEST_ROOT="$BASE/rootfs" sh "$BASE/rootfs/bin/dae" run >/dev/null 2>&1 &
+  DAEPILOT_TEST_ROOT="$BASE/rootfs" sh "$BASE/rootfs/bin/dae" run -c /config/config.dae >/dev/null 2>&1 &
   DAEMON_PID=$!
   echo "$DAEMON_PID" > "$BASE/run/dae.host.pid"
   i=0
@@ -277,6 +326,24 @@ out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
 assert_eq "$rc" "0" "buggy ctl still exits 0 (as it did on device)"
 assert_contains "$CONF" "GEOIP-BINARY-MARKER" \
   "harness reproduces the geoip-overwrites-config.dae bug"
+
+# 7. "wan_interface: auto" is resolved against Android policy routing before
+#    the chroot copy is written, while the app-owned config keeps "auto".
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf 'global {\n  wan_interface: auto\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with auto WAN succeeds"
+assert_contains "$CONF" "wan_interface: auto" "source config keeps auto"
+assert_contains "$BASE/rootfs/config/config.dae" "wan_interface: eth0" \
+  "chroot config gets the detected WAN"
+
+# 8. The chroot must live in a private mount namespace and never unmount
+#    host-visible mounts (the /dev/binderfs regression).
+assert_contains "$CTL_SRC" "exec_in_private_ns" "ctl has the private-mount-namespace entry point"
+assert_contains "$CTL_SRC" "unshare -m" "ctl launches the chroot under unshare -m"
+assert_not_contains "$CTL_SRC" "cleanup_mounts" "ctl no longer unmounts host-visible chroot mounts"
+assert_not_contains "$CTL_SRC" "umount -l" "ctl does not lazy-unmount anything"
 
 # ==========================================================================
 if [ "$FAILED" -eq 0 ]; then

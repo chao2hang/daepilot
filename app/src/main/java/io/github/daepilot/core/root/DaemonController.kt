@@ -1,6 +1,8 @@
 package io.github.daepilot.core.root
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
 import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
 import kotlinx.coroutines.Dispatchers
@@ -67,6 +69,7 @@ class DaemonController(
             if (!root.writeFile(DaePaths.STAGING, config, "600")) {
                 return@withContext ActionResult(false, "无法写入暂存配置（$DaePaths.STAGING）")
             }
+            syncDnsServers()
             val flag = if (reload) " --reload" else ""
             val result = root.run(
                 "${DaePaths.CTL} apply ${RootShell.quote(DaePaths.STAGING)}$flag 2>&1",
@@ -148,6 +151,7 @@ class DaemonController(
         if (!root.isRootAvailable()) return ActionResult(false, "未获得 root 权限")
         if (!isModuleInstalled()) return ActionResult(false, "尚未安装 DaePilot Magisk 模块")
         if (!root.exists(DaePaths.CTL)) return ActionResult(false, "模块控制脚本缺失，请重新刷入模块")
+        if (command == "start" || command == "reload") syncDnsServers()
         // Merge stderr into stdout: daepilotctl's fail() writes diagnostics to
         // stderr, and libsu captures the streams separately — without this the
         // app would show a generic "执行失败" instead of the real reason
@@ -155,6 +159,39 @@ class DaemonController(
         val result = root.run("${DaePaths.CTL} $command 2>&1", timeoutMs = timeoutMs)
         val text = result.out.ifBlank { result.err }.trim()
         return ActionResult(result.ok, text.ifBlank { if (result.ok) "完成" else "执行失败" })
+    }
+
+    /**
+     * Publishes the active network's resolvers for dae's bootstrap resolver.
+     *
+     * Android keeps `net.dns1..4` empty on many ROMs, and carriers routinely
+     * drop queries to public resolvers, so the script cannot discover a usable
+     * resolver on its own. `dumpsys` is not reachable from a root shell on
+     * every build, but the app can always read [android.net.LinkProperties].
+     */
+    private suspend fun syncDnsServers() {
+        val servers = runCatching { activeDnsServers() }.getOrDefault(emptyList())
+        if (servers.isEmpty()) return
+        root.writeFile(DaePaths.DNS_SERVERS, servers.joinToString("\n", postfix = "\n"), "600")
+    }
+
+    private fun activeDnsServers(): List<String> {
+        val manager = context.getSystemService(ConnectivityManager::class.java) ?: return emptyList()
+        val networks = LinkedHashSet<Network>()
+        manager.activeNetwork?.let(networks::add)
+        networks.addAll(manager.allNetworks)
+        val servers = LinkedHashSet<String>()
+        for (network in networks) {
+            val properties = manager.getLinkProperties(network) ?: continue
+            for (address in properties.dnsServers) {
+                val host = address.hostAddress?.substringBefore('%') ?: continue
+                if (host.isEmpty() || host == "::1" || host == "0.0.0.0") continue
+                if (host.startsWith("127.") || host.startsWith("169.254.")) continue
+                if (host.startsWith("fe80:", ignoreCase = true)) continue
+                servers.add(host)
+            }
+        }
+        return servers.toList()
     }
 
     companion object {

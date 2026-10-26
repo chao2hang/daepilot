@@ -5,6 +5,11 @@
 # the watchdog share one implementation. dae runs inside a chroot under
 # /data/adb/daepilot/rootfs, detached from the calling (app) process.
 #
+# Mount safety: the chroot is prepared in a private mount namespace created by
+# `unshare -m`. Its mounts (including the /dev rbind) are destroyed with the
+# namespace, so the shared host namespace is never mounted into or umounted
+# from. This prevents mount propagation from tearing down /dev/binderfs.
+#
 # Commands: start stop restart reload enable disable apply validate status logs
 #           clearlog diagnose watch
 
@@ -27,11 +32,14 @@ WLOG="$BASE/logs/watchdog.log"
 HOST_PID="$RUN/dae.host.pid"
 DAE_PID="$ROOTFS/run/dae.pid"
 WATCH_PID="$RUN/watchdog.pid"
+DNS_SERVERS="$RUN/dns.servers"
 ENABLED="$BASE/enabled"
 BOOT_ENABLED="$BASE/boot_enabled"
 VERSION_FILE="$BASE/bin/VERSION"
 CONFIG_OK="$RUN/config.ok"
 LAST_ERROR="$RUN/last_error"
+WAN_FILE="$RUN/wan.interface"
+WAN_AUTO="$RUN/wan.auto"
 
 BB=""
 for candidate in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /system/xbin/busybox; do
@@ -53,6 +61,15 @@ clear_error() { rm -f "$LAST_ERROR" 2>/dev/null; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# dae loads geoip/geosite into BPF LPM tries at startup. Android caps locked
+# memory at 64 KiB, and a map update that cannot charge its pages fails with
+# "newLpmMap: batch update: cannot allocate memory", which aborts the daemon
+# before it creates the tproxy listener. Raising the soft limit is harmless on
+# kernels that charge BPF memory to the cgroup instead.
+raise_memlock() {
+  ulimit -l unlimited 2>/dev/null || true
+}
+
 ensure_layout() {
   mkdir -p "$BASE/bin" "$CONF_DIR" "$STAGING" "$RUN" "$BASE/logs" 2>/dev/null
   mkdir -p "$ROOTFS/bin" "$ROOTFS/config" "$ROOTFS/run" "$ROOTFS/proc" \
@@ -71,10 +88,28 @@ ensure_layout() {
 }
 
 is_mounted() {
-  grep -q " $1 " /proc/mounts 2>/dev/null
+  # mountpoint(1) avoids parsing /proc/mounts entirely. The fallback reads the
+  # table instead of `grep -q`: on some shells/OSes /proc/mounts is a synthetic
+  # pipe and an early-exiting grep can leave the reader blocked.
+  if have mountpoint; then
+    mountpoint -q "$1" 2>/dev/null
+    return $?
+  fi
+  local mount_point
+  while IFS=' ' read -r _ mount_point _; do
+    [ "$mount_point" = "$1" ] && return 0
+  done < /proc/mounts 2>/dev/null
+  return 1
 }
-
 ensure_mounts() {
+  # Only ever called from exec_in_private_ns. Mounting from the shared host
+  # namespace is what leaked rbind clones into /dev and broke binder for the
+  # whole system on teardown, so fail closed instead.
+  if [ "${DAEPILOT_PRIVATE_MNT_NS:-0}" != "1" ]; then
+    fail "internal error: ensure_mounts called outside private mount namespace"
+    return 1
+  fi
+
   ensure_layout
 
   if ! is_mounted "$ROOTFS/proc"; then
@@ -99,45 +134,69 @@ ensure_mounts() {
   if [ -d /sys/fs/cgroup ] && ! is_mounted "$ROOTFS/sys/fs/cgroup"; then
     mount --rbind /sys/fs/cgroup "$ROOTFS/sys/fs/cgroup" 2>/dev/null || true
   fi
-  # Writable /run (netns state, pid/progress files).
-  if ! is_mounted "$ROOTFS/run"; then
-    mount -t tmpfs -o mode=0755,size=16m tmpfs "$ROOTFS/run" 2>/dev/null || true
-  fi
+  # /run stays a plain directory. A private tmpfs would be invisible to the
+  # host-side watchdog, hiding dae.pid from daemon_pid and status.
+  mkdir -p "$ROOTFS/run" 2>/dev/null
+  chmod 755 "$ROOTFS/run" 2>/dev/null
   if ! is_mounted "$ROOTFS/sys/fs/bpf"; then
     mount -t bpf bpf "$ROOTFS/sys/fs/bpf" 2>/dev/null || \
       mount --rbind /sys/fs/bpf "$ROOTFS/sys/fs/bpf" 2>/dev/null || true
   fi
 }
 
-cleanup_mounts() {
-  # Unmount only paths under our rootfs; host mounts are never touched.
-  for path in "$ROOTFS/sys/fs/bpf" "$ROOTFS/sys/fs/cgroup" \
-              "$ROOTFS/sys/kernel/btf" "$ROOTFS/sys/class" "$ROOTFS/sys/devices" \
-              "$ROOTFS/run" "$ROOTFS/dev" "$ROOTFS/proc"; do
-    if is_mounted "$path"; then
-      umount -l "$path" 2>/dev/null || umount "$path" 2>/dev/null || true
-    fi
-  done
+# Appends a resolver unless it is unusable or already listed.
+add_nameserver() {
+  ns="$1"
+  case "$ns" in
+    ""|"0.0.0.0"|"::"|"::1"|127.*|fe80:*|169.254.*) return 0 ;;
+  esac
+  grep -qx "nameserver $ns" "$resolv_tmp" 2>/dev/null && return 0
+  echo "nameserver $ns" >> "$resolv_tmp"
 }
 
 write_resolv() {
   mkdir -p "$ROOTFS/etc" 2>/dev/null
-  tmp="$ROOTFS/etc/resolv.conf.new"
-  : > "$tmp"
-  for prop in net.dns1 net.dns2 net.dns3 net.dns4; do
-    dns="$(getprop "$prop" 2>/dev/null | tr -d ' ')"
-    case "$dns" in
-      ""|"0.0.0.0"|"::"|"::1"|"127.0.0.1") ;;
-      *) echo "nameserver $dns" >> "$tmp" ;;
-    esac
-  done
-  if [ ! -s "$tmp" ]; then
-    # 119.29.29.29 (DNSPod) is reachable on networks where public UDP/53
-    # resolvers such as 1.1.1.1 are blocked.
-    echo "nameserver 119.29.29.29" >> "$tmp"
-    echo "nameserver 223.5.5.5" >> "$tmp"
+  resolv_tmp="$ROOTFS/etc/resolv.conf.new"
+  : > "$resolv_tmp"
+
+  # The app publishes the active network's resolvers here. Android keeps
+  # net.dns1..4 empty on many ROMs, and carriers commonly drop queries to
+  # public resolvers, which breaks dae's bootstrap lookup of node domains.
+  if [ -s "$DNS_SERVERS" ]; then
+    while IFS= read -r ns; do
+      add_nameserver "$(printf '%s' "$ns" | tr -d ' \r\t')"
+    done < "$DNS_SERVERS"
   fi
-  mv "$tmp" "$ROOTFS/etc/resolv.conf" 2>/dev/null
+
+  for prop in net.dns1 net.dns2 net.dns3 net.dns4; do
+    add_nameserver "$(getprop "$prop" 2>/dev/null | tr -d ' \r\t')"
+  done
+
+  # Fallback for ROMs where a root shell can reach binder (dumpsys is not
+  # available on every build, e.g. when /dev/binderfs is not mounted).
+  if [ ! -s "$resolv_tmp" ] && have dumpsys; then
+    if have timeout; then
+      dump="$(timeout 8 dumpsys connectivity 2>/dev/null)"
+    else
+      dump="$(dumpsys connectivity 2>/dev/null)"
+    fi
+    printf '%s\n' "$dump" \
+      | sed -n 's/.*DnsAddresses: \[\([^]]*\)\].*/\1/p' \
+      | tr ', ' '\n\n' \
+      | while IFS= read -r ns; do
+          add_nameserver "$ns"
+        done
+  fi
+
+  if [ ! -s "$resolv_tmp" ]; then
+    # Last resort. AliDNS first: 119.29.29.29 times out on cellular networks
+    # that only allow their own resolvers.
+    for ns in 223.5.5.5 223.6.6.6 119.29.29.29 114.114.114.114; do
+      add_nameserver "$ns"
+    done
+  fi
+
+  mv "$resolv_tmp" "$ROOTFS/etc/resolv.conf" 2>/dev/null
   chmod 644 "$ROOTFS/etc/resolv.conf" 2>/dev/null
 
   if [ -f /system/etc/hosts ]; then
@@ -170,7 +229,59 @@ write_ca_bundle() {
   fi
 }
 
+# Android keeps the real default route out of the main table on cellular
+# (per-network policy routing), so dae's own "auto" detection can come back
+# empty and leave the daemon without a datapath. Pick the first policy table
+# that carries a usable default route instead.
+detect_default_table() {
+  local table route
+  for table in $(ip rule 2>/dev/null | sed -n 's/.* lookup \([^ ]*\).*/\1/p'); do
+    case "$table" in
+      ""|dummy0|*[!A-Za-z0-9_.-]*) continue ;;
+    esac
+    route="$(ip route show table "$table" 2>/dev/null | grep -m 1 '^default')"
+    [ -n "$route" ] || continue
+    case "$route" in
+      *" dev dummy0"*|*" dev lo"*|*blackhole*|*unreachable*|*prohibit*|*throw*) continue ;;
+    esac
+    printf '%s\n' "$table"
+    return 0
+  done
+  return 1
+}
+
+detect_wan_interface() {
+  local table route dev
+  table="$(detect_default_table)" || return 1
+  route="$(ip route show table "$table" 2>/dev/null | grep -m 1 '^default')"
+  dev="$(printf '%s\n' "$route" | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
+  [ -n "$dev" ] || return 1
+  ip link show "$dev" 2>/dev/null | grep -q "UP" || return 1
+  ip -4 addr show dev "$dev" 2>/dev/null | grep -q "inet " || return 1
+  printf '%s\n' "$dev"
+}
+
+# Copy a rendered config into place, replacing dae's "auto" WAN with the
+# interface Android is actually using. The app keeps writing "auto" so the
+# same rendered config remains portable across Wi-Fi and cellular.
+stage_config() {
+  local src dst wan tmp
+  src="$1"
+  dst="$2"
+  wan="$(detect_wan_interface 2>/dev/null)"
+  if [ -n "$wan" ]; then
+    tmp="$dst.tmp.$$"
+    if sed "s/^\([[:space:]]*wan_interface:[[:space:]]*\)auto[[:space:]]*$/\1$wan/" \
+        "$src" > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$dst" 2>/dev/null && return 0
+    fi
+    rm -f "$tmp" 2>/dev/null
+  fi
+  cp "$src" "$dst"
+}
+
 prepare_chroot() {
+  ensure_layout
   write_resolv
   write_ca_bundle
   # Keep the static binary inside the chroot; dae is not dynamically linked,
@@ -182,11 +293,29 @@ prepare_chroot() {
     fi
   fi
   if [ -f "$CONF" ]; then
-    cp "$CONF" "$ROOTFS/config/config.dae" 2>/dev/null
+    stage_config "$CONF" "$ROOTFS/config/config.dae" 2>/dev/null
     chmod 600 "$ROOTFS/config/config.dae" 2>/dev/null
   fi
   ensure_geodata || return 1
   chmod 700 "$ROOTFS/config" 2>/dev/null
+}
+
+# Remember what the daemon actually bound. The watchdog uses this to restart
+# when Android switches networks (Wi-Fi <-> cellular).
+record_wan_binding() {
+  local wan
+  wan="$(sed -n 's/^[[:space:]]*wan_interface:[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+    "$ROOTFS/config/config.dae" 2>/dev/null | head -n 1)"
+  if [ -n "$wan" ] && [ "$wan" != "auto" ]; then
+    printf '%s\n' "$wan" > "$WAN_FILE" 2>/dev/null
+  else
+    rm -f "$WAN_FILE" 2>/dev/null
+  fi
+  if grep -qE '^[[:space:]]*wan_interface:[[:space:]]*auto' "$CONF" 2>/dev/null; then
+    : > "$WAN_AUTO" 2>/dev/null
+  else
+    rm -f "$WAN_AUTO" 2>/dev/null
+  fi
 }
 
 # dae looks for geosite.dat/geoip.dat next to the config file. The copies are
@@ -215,34 +344,132 @@ ensure_geodata() {
   return 0
 }
 
+# Re-exec the controller inside a throwaway mount namespace, prepare the
+# chroot there and exec the target command. Every mount created here dies with
+# the namespace; the shared host namespace is never touched, so no umount is
+# needed (or allowed) on teardown.
+# True when this namespace's root mount is not in a propagation peer group.
+# unshare(2) already clones the tree as private on many kernels, so the usual
+# case needs no mount(8) call at all. The exit status of mount -o rprivate is
+# not usable as evidence: busybox treats a lone directory as an fstab lookup
+# and toybox accepts unknown -o flags without applying them.
+ns_root_is_private() {
+  local line
+  if [ -n "$BB" ]; then
+    line="$("$BB" awk '$5 == "/" { print; exit }' /proc/self/mountinfo 2>/dev/null)"
+  else
+    line="$(awk '$5 == "/" { print; exit }' /proc/self/mountinfo 2>/dev/null)"
+  fi
+  [ -n "$line" ] || return 1
+  case "$line" in
+    *" shared:"*) return 1 ;;
+  esac
+  return 0
+}
+
+exec_in_private_ns() {
+  if [ -z "$BB" ]; then
+    echo "daepilot: 需要 busybox 的 mount -o rprivate，拒绝在宿主 mount namespace 继续" >&2
+    return 1
+  fi
+
+  # Android's root mount is shared. Without making the copied namespace
+  # private, --rbind /dev joins the host peer group and a later umount
+  # propagates to the host (this is how /dev/binderfs disappeared).
+  if ! ns_root_is_private; then
+    "$BB" mount -o remount,rprivate / 2>/dev/null || true
+    ns_root_is_private \
+      || { echo "daepilot: cannot make mount namespace private" >&2; return 1; }
+  fi
+
+  export DAEPILOT_PRIVATE_MNT_NS=1
+  ensure_mounts || return 1
+  exec "$BB" chroot "$ROOTFS" "$@"
+}
+
 run_chroot() {
   if [ -n "$BB" ]; then
-    "$BB" chroot "$ROOTFS" "$@"
+    "$BB" unshare -m "$CTL" __run_in_ns "$@"
   else
-    chroot "$ROOTFS" "$@"
+    unshare -m "$CTL" __run_in_ns "$@"
   fi
+}
+
+# True when $1 is a live dae started from our chroot config. The variables are
+# local on purpose: a global `pid` here overwrote the caller's candidate, which
+# made daemon_pid echo a stale pid after its pid-file probe failed.
+is_our_dae() {
+  local pid="$1" state cmd
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  # kill -0 also succeeds for an unreaped zombie, which holds no sockets and
+  # would make status claim the daemon is up while the proxy is dead.
+  state="$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$pid/stat" 2>/dev/null)"
+  [ "$state" = "Z" ] && return 1
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  cmd="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+  case "$cmd" in
+    *"run -c /config/config.dae"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Every live dae, including instances whose pid file was lost. The app, the
+# script and the watchdog can run in different mount namespaces, so the pid
+# files are not authoritative.
+dae_pids() {
+  found=""
+  if have pidof; then
+    for pid in $(pidof dae 2>/dev/null); do
+      if is_our_dae "$pid"; then found="$found $pid"; fi
+    done
+  fi
+  if [ -z "$found" ]; then
+    for dir in /proc/[0-9]*; do
+      pid="${dir#/proc/}"
+      if is_our_dae "$pid"; then found="$found $pid"; fi
+    done
+  fi
+  for pid in $found; do echo "$pid"; done
+}
+
+watchdog_pid() {
+  pid=""
+  if [ -s "$WATCH_PID" ]; then
+    candidate="$(tr -dc '0-9' < "$WATCH_PID" 2>/dev/null)"
+    if [ -n "$candidate" ] && kill -0 "$candidate" 2>/dev/null; then
+      pid="$candidate"
+    fi
+  fi
+  if [ -z "$pid" ]; then
+    for dir in /proc/[0-9]*; do
+      candidate="${dir#/proc/}"
+      [ -r "$dir/cmdline" ] || continue
+      cmd="$(tr '\000' ' ' < "$dir/cmdline" 2>/dev/null)"
+      case "$cmd" in
+        *"daepilotctl watch"*) pid="$candidate"; break ;;
+      esac
+    done
+  fi
+  [ -n "$pid" ] || return 1
+  echo "$pid"
+  return 0
 }
 
 daemon_pid() {
   pid=""
-  if [ -f "$DAE_PID" ]; then
-    pid="$(cat "$DAE_PID" 2>/dev/null | tr -dc '0-9')"
-  fi
-  if [ -z "$pid" ] && [ -f "$HOST_PID" ]; then
-    pid="$(cat "$HOST_PID" 2>/dev/null | tr -dc '0-9')"
+  for pid_file in "$DAE_PID" "$HOST_PID"; do
+    [ -s "$pid_file" ] || continue
+    candidate="$(tr -dc '0-9' < "$pid_file" 2>/dev/null)"
+    if is_our_dae "$candidate"; then
+      pid="$candidate"
+      break
+    fi
+  done
+  if [ -z "$pid" ]; then
+    pid="$(dae_pids 2>/dev/null | head -n 1)"
   fi
   [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
-  if [ -r "/proc/$pid/status" ] && grep -qE '^State:[[:space:]]*Z' "/proc/$pid/status"; then
-    return 1
-  fi
-  if [ -r "/proc/$pid/cmdline" ]; then
-    cmd="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
-    case "$cmd" in
-      *dae*) echo "$pid"; return 0 ;;
-      *) return 1 ;;
-    esac
-  fi
   echo "$pid"
   return 0
 }
@@ -266,6 +493,7 @@ remove_dae_route() {
     # migrate the rule to 9900 instead of leaving a stale duplicate behind.
     for priority in "$DAE_MARK_RULE_PRIORITY" "$DAE_MARK_LEGACY_PRIORITY"; do
       while ip rule del priority "$priority" 2>/dev/null; do :; done
+      while ip -6 rule del priority "$priority" 2>/dev/null; do :; done
     done
   fi
 }
@@ -273,21 +501,7 @@ remove_dae_route() {
 ensure_dae_route() {
   have ip || { fail "找不到 ip 命令，无法配置 dae socket 路由"; return 1; }
 
-  selected_table=""
-  for table in $(ip rule 2>/dev/null | sed -n 's/.* lookup \([^ ]*\).*/\1/p'); do
-    case "$table" in
-      ""|dummy0|*[!A-Za-z0-9_.-]*) continue ;;
-    esac
-    route="$(ip route show table "$table" 2>/dev/null | grep -m 1 '^default')"
-    [ -n "$route" ] || continue
-    case "$route" in
-      *" dev dummy0"*|*" dev lo"*|*blackhole*|*unreachable*|*prohibit*|*throw*) continue ;;
-    esac
-    selected_table="$table"
-    break
-  done
-
-  [ -n "$selected_table" ] || {
+  selected_table="$(detect_default_table)" || {
     fail "未找到可供 dae 使用的默认路由（已排除 dummy0/黑洞路由）"
     return 1
   }
@@ -298,16 +512,45 @@ ensure_dae_route() {
     fail "无法添加 dae socket 路由规则（priority $DAE_MARK_RULE_PRIORITY, table $selected_table）"
     return 1
   fi
+
+  # IPv6 keeps its own policy table set. Without a marked rule, dae's IPv6
+  # sockets (e.g. an AAAA bootstrap resolver, or a v6-only network) fall
+  # through to the terminal unreachable rule even when IPv4 works.
+  # Prefer the table that routes out of the WAN interface dae is bound to;
+  # Android also carries live v6 tables for other links (rmnet_data2 here),
+  # and picking one of those sends marked traffic out the wrong link.
+  v6_table=""
+  v6_fallback=""
+  wan_dev="$(detect_wan_interface 2>/dev/null)"
+  for table in $(ip -6 rule 2>/dev/null | sed -n 's/.* lookup \([^ ]*\).*/\1/p'); do
+    case "$table" in
+      ""|dummy0|*[!A-Za-z0-9_.-]*) continue ;;
+    esac
+    route="$(ip -6 route show table "$table" 2>/dev/null | grep -m 1 '^default')"
+    [ -n "$route" ] || continue
+    case "$route" in
+      *" dev dummy0"*|*" dev lo"*|*blackhole*|*unreachable*|*prohibit*|*throw*) continue ;;
+    esac
+    dev="$(printf '%s\n' "$route" | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
+    [ -n "$v6_fallback" ] || v6_fallback="$table"
+    if [ -n "$wan_dev" ] && [ "$dev" = "$wan_dev" ]; then
+      v6_table="$table"
+      break
+    fi
+  done
+  [ -n "$v6_table" ] || v6_table="$v6_fallback"
+  if [ -n "$v6_table" ]; then
+    ip -6 rule add from all fwmark 0x100/0x1ffff table "$v6_table" priority "$DAE_MARK_RULE_PRIORITY" 2>/dev/null || true
+  fi
   return 0
 }
 
 validate_file() {
   file="$1"
   [ -f "$file" ] || { fail "配置文件不存在：$file"; return 1; }
-  ensure_mounts
   prepare_chroot || return 1
   mkdir -p "$ROOTFS/config" 2>/dev/null
-  cp "$file" "$VALIDATE_CONF" 2>/dev/null || { fail "无法写入校验配置"; return 1; }
+  stage_config "$file" "$VALIDATE_CONF" 2>/dev/null || { fail "无法写入校验配置"; return 1; }
   chmod 600 "$VALIDATE_CONF" 2>/dev/null
   out="$(run_chroot /bin/dae validate -c "$VALIDATE_CONF_GUEST" 2>&1)"
   code=$?
@@ -321,7 +564,8 @@ validate_file() {
     # Surface dae's first meaningful output line in the error so the app event
     # log shows the real reason (e.g. "invalid config filename") instead of a
     # bare message; the complete output stays in the local daemon log.
-    detail="$(printf '%s\n' "$out" | grep -m 1 . 2>/dev/null || true)"
+    # Skip logrus lines: they typically precede the actual parse error.
+    detail="$(printf '%s\n' "$out" | grep -v '^time=' | grep -m 1 . 2>/dev/null || true)"
     case "$detail" in
       "") fail "配置校验失败" ;;
       *) fail "配置校验失败：$detail" ;;
@@ -338,34 +582,55 @@ start_daemon() {
   [ -x "$DAE" ] || { fail "dae 二进制缺失：$DAE"; return 1; }
   [ -x "$CTL" ] || { fail "控制脚本缺失：$CTL"; return 1; }
   if is_running; then
-    say "already running (pid $(daemon_pid))"
+    pid="$(daemon_pid)"
+    echo "$pid" > "$HOST_PID" 2>/dev/null
+    # The instance may have been adopted after a crash that also lost the
+    # fwmark rule; restore it so dae's own dials keep working.
+    ensure_dae_route >/dev/null 2>&1 || true
+    say "already running (pid $pid)"
     return 0
   fi
   # Recover a fwmark rule left behind by a crash/reboot before revalidating.
   remove_dae_route
+  # A crashed instance can leave its dae0 link behind; attaching the TC hook
+  # to it then fails with "attach tcx link: no such device" and dae exits.
+  if have ip; then
+    for link in dae0 dae0peer; do
+      if ip link show "$link" >/dev/null 2>&1; then
+        ip link del "$link" 2>/dev/null || true
+      fi
+    done
+  fi
   [ -f "$CONF" ] || { fail "尚未生成配置，请先在 App 中应用配置"; return 1; }
 
-  ensure_mounts
   prepare_chroot || return 1
   validate_file "$CONF" || return 1
   echo "config_valid=1" > "$CONFIG_OK"
+
+  # Remember what the daemon actually bound. The watchdog restarts it when
+  # Android switches networks (Wi-Fi <-> cellular) and the interface changes.
+  record_wan_binding
 
   # dae marks its own sockets 0x100 to avoid self-capture. Android policy
   # routing needs an explicit lookup for that mark, otherwise the socket may
   # hit a terminal unreachable rule before reaching the network.
   ensure_dae_route || return 1
 
+  raise_memlock
   rotate_log
   rm -f "$DAE_PID" "$HOST_PID" 2>/dev/null
   say "starting dae (chroot $ROOTFS)"
   printf '\n=== %s start ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG"
 
+  # dae lives in its own mount namespace. The chroot mounts are created by
+  # __run_in_ns inside that namespace and are destroyed automatically when
+  # the daemon exits; nothing is mounted in (or unmounted from) the host.
   if [ -n "$BB" ]; then
-    "$BB" setsid "$BB" chroot "$ROOTFS" /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp >> "$LOG" 2>&1 &
+    "$BB" setsid "$BB" unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp >> "$LOG" 2>&1 &
   elif have setsid; then
-    setsid chroot "$ROOTFS" /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp >> "$LOG" 2>&1 &
+    setsid unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp >> "$LOG" 2>&1 &
   else
-    chroot "$ROOTFS" /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp >> "$LOG" 2>&1 &
+    unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp >> "$LOG" 2>&1 &
   fi
   launched=$!
   echo "$launched" > "$HOST_PID"
@@ -396,24 +661,30 @@ start_daemon() {
 }
 
 stop_daemon() {
-  pid="$(daemon_pid 2>/dev/null)"
-  if [ -n "$pid" ]; then
-    kill "$pid" 2>/dev/null
+  pids="$(dae_pids 2>/dev/null)"
+  if [ -n "$pids" ]; then
+    for pid in $pids; do
+      kill "$pid" 2>/dev/null
+    done
     i=0
-    while [ "$i" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do
+    while [ "$i" -lt 20 ]; do
+      alive=""
+      for pid in $pids; do
+        is_our_dae "$pid" && alive="$alive $pid"
+      done
+      [ -z "$alive" ] && break
       sleep 0.5 2>/dev/null || sleep 1
       i=$((i + 1))
     done
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -9 "$pid" 2>/dev/null
-    fi
-    say "stopped (pid $pid)"
+    for pid in $pids; do
+      is_our_dae "$pid" && kill -9 "$pid" 2>/dev/null
+    done
+    say "stopped (pid $pids)"
   else
     say "not running"
   fi
   rm -f "$DAE_PID" "$HOST_PID" 2>/dev/null
   remove_dae_route
-  cleanup_mounts
 }
 
 do_reload() {
@@ -421,17 +692,19 @@ do_reload() {
     fail "dae 未运行，无法热重载"
     return 1
   fi
-  ensure_mounts
   prepare_chroot || return 1
+  record_wan_binding
   ensure_dae_route || return 1
-  if [ -n "$BB" ] && have timeout; then
-    out="$(timeout 90 "$BB" chroot "$ROOTFS" /bin/dae reload 2>&1)"
-  elif [ -n "$BB" ]; then
-    out="$("$BB" chroot "$ROOTFS" /bin/dae reload 2>&1)"
-  elif have timeout; then
-    out="$(timeout 90 chroot "$ROOTFS" /bin/dae reload 2>&1)"
+  # Run the reload CLI in a private mount namespace as well: it needs the
+  # chroot's /proc and /dev, which no longer exist in the host namespace.
+  if have timeout; then
+    if [ -n "$BB" ]; then
+      out="$(timeout 90 "$BB" unshare -m "$CTL" __run_in_ns /bin/dae reload 2>&1)"
+    else
+      out="$(timeout 90 unshare -m "$CTL" __run_in_ns /bin/dae reload 2>&1)"
+    fi
   else
-    out="$(chroot "$ROOTFS" /bin/dae reload 2>&1)"
+    out="$(run_chroot /bin/dae reload 2>&1)"
   fi
   code=$?
   printf '%s\n' "$out"
@@ -456,7 +729,7 @@ apply_config() {
   fi
   cp "$src" "$CONF" 2>/dev/null || { fail "无法写入配置"; return 1; }
   chmod 600 "$CONF" 2>/dev/null
-  cp "$CONF" "$ROOTFS/config/config.dae" 2>/dev/null
+  stage_config "$CONF" "$ROOTFS/config/config.dae" 2>/dev/null
   chmod 600 "$ROOTFS/config/config.dae" 2>/dev/null
 
   if [ "$do_reload_flag" = "--reload" ] && is_running; then
@@ -472,7 +745,7 @@ apply_config() {
     if [ -f "$BAK" ] && validate_file "$BAK"; then
       say "热重载失败，回滚并重启 daemon"
       cp "$BAK" "$CONF" 2>/dev/null
-      cp "$BAK" "$ROOTFS/config/config.dae" 2>/dev/null
+      stage_config "$BAK" "$ROOTFS/config/config.dae" 2>/dev/null
       stop_daemon
       start_daemon
       fail "新配置热重载失败，已回滚到上一版"
@@ -488,10 +761,8 @@ apply_config() {
 }
 
 ensure_watchdog() {
-  pid=""
-  [ -f "$WATCH_PID" ] && pid="$(cat "$WATCH_PID" 2>/dev/null | tr -dc '0-9')"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && \
-     tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'daepilotctl'; then
+  if existing="$(watchdog_pid 2>/dev/null)"; then
+    echo "$existing" > "$WATCH_PID" 2>/dev/null
     return 0
   fi
   mkdir -p "$RUN" 2>/dev/null
@@ -505,8 +776,31 @@ ensure_watchdog() {
   say "watchdog started"
 }
 
+stop_watchdog() {
+  if wpid="$(watchdog_pid 2>/dev/null)"; then
+    kill "$wpid" 2>/dev/null
+  fi
+  rm -f "$WATCH_PID" 2>/dev/null
+}
+
 watch_loop() {
   mkdir -p "$RUN" 2>/dev/null
+  # A second watchdog would race the first one on every restart; the pid file
+  # alone cannot detect one started from another mount namespace.
+  others=""
+  for dir in /proc/[0-9]*; do
+    other="${dir#/proc/}"
+    [ "$other" = "$$" ] && continue
+    [ -r "$dir/cmdline" ] || continue
+    cmd="$(tr '\000' ' ' < "$dir/cmdline" 2>/dev/null)"
+    case "$cmd" in
+      *"daepilotctl watch"*) others="$others $other" ;;
+    esac
+  done
+  if [ -n "$others" ]; then
+    say "watchdog already running (pid$others)"
+    exit 0
+  fi
   echo $$ > "$WATCH_PID"
   trap 'rm -f "$WATCH_PID" 2>/dev/null; exit 0' TERM INT HUP
   say "watchdog $$ started"
@@ -515,6 +809,23 @@ watch_loop() {
       rotate_watch_log
       say "[$(date '+%Y-%m-%d %H:%M:%S')] daemon down, restarting"
       start_daemon >> "$WLOG" 2>&1
+    else
+      # dae binds one interface name. Android swaps Wi-Fi/cellular interfaces
+      # behind the same default route, so follow the change with a restart
+      # instead of leaving the daemon attached to a dead link.
+      current_wan="$(detect_wan_interface 2>/dev/null)"
+      bound_wan="$(head -n 1 "$WAN_FILE" 2>/dev/null)"
+      if [ -f "$WAN_AUTO" ] && [ -n "$current_wan" ] && [ -n "$bound_wan" ] \
+          && [ "$current_wan" != "$bound_wan" ]; then
+        rotate_watch_log
+        say "[$(date '+%Y-%m-%d %H:%M:%S')] WAN changed ($bound_wan -> $current_wan), restarting"
+        stop_daemon
+        start_daemon >> "$WLOG" 2>&1
+      elif ! ip rule show 2>/dev/null | grep -q "fwmark 0x100/0x1ffff"; then
+        # A reboot/network reset can drop the mark rule while dae keeps
+        # running; without it dae's own dials hit the unreachable rule.
+        ensure_dae_route >/dev/null 2>&1 || true
+      fi
     fi
     sleep 15
   done
@@ -559,13 +870,8 @@ status() {
   [ -f "$ENABLED" ] && echo "enabled=1" || echo "enabled=0"
   [ -f "$BOOT_ENABLED" ] && echo "boot_enabled=1" || echo "boot_enabled=0"
   [ -s "$CONFIG_OK" ] && echo "config_valid=1" || echo "config_valid=0"
-  if [ -f "$WATCH_PID" ]; then
-    wpid="$(cat "$WATCH_PID" 2>/dev/null | tr -dc '0-9')"
-    if [ -n "$wpid" ] && kill -0 "$wpid" 2>/dev/null; then
-      echo "watchdog=1"
-    else
-      echo "watchdog=0"
-    fi
+  if watchdog_pid >/dev/null 2>&1; then
+    echo "watchdog=1"
   else
     echo "watchdog=0"
   fi
@@ -587,6 +893,10 @@ diagnose() {
   [ -d /data/adb/modules/daepilot ] && echo "module=1" || echo "module=0"
   [ -x "$DAE" ] && echo "dae=1" || echo "dae=0"
   [ -f "$CONF" ] && echo "config=1" || echo "config=0"
+  echo "dae_pids=$(dae_pids 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+  echo "watchdog_pid=$(watchdog_pid 2>/dev/null || echo 0)"
+  echo "resolv=$(tr '\n' ' ' < "$ROOTFS/etc/resolv.conf" 2>/dev/null | sed 's/ $//')"
+  echo "dns_file=$(tr '\n' ' ' < "$DNS_SERVERS" 2>/dev/null | sed 's/ $//')"
   echo "conflicts=$(ps -A -o NAME= 2>/dev/null | grep -cE '^(sing-box|clash|mihomo|xray|v2ray|hysteria)$')"
 }
 
@@ -598,16 +908,12 @@ case "${1:-status}" in
     ;;
   stop)
     rm -f "$ENABLED" 2>/dev/null
+    stop_watchdog
     stop_daemon
-    pid=""
-    [ -f "$WATCH_PID" ] && pid="$(cat "$WATCH_PID" 2>/dev/null | tr -dc '0-9')"
-    if [ -n "$pid" ]; then
-      kill "$pid" 2>/dev/null
-      rm -f "$WATCH_PID" 2>/dev/null
-    fi
     ;;
   restart)
     touch "$ENABLED" 2>/dev/null
+    stop_watchdog
     stop_daemon
     start_daemon || exit 1
     ensure_watchdog
@@ -647,6 +953,10 @@ case "${1:-status}" in
     ;;
   watch)
     watch_loop
+    ;;
+  __run_in_ns)
+    shift
+    exec_in_private_ns "$@"
     ;;
   *)
     say "usage: $0 {start|stop|restart|reload|enable|disable|apply <file> [--reload]|validate [file]|status|logs [n]|clearlog|diagnose|watch}"

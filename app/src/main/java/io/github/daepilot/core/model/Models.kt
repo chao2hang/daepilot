@@ -126,8 +126,11 @@ enum class RoutingTemplate(val label: String, val description: String) {
 
 @Serializable
 data class DnsConfig(
-    val domesticUpstream: String = "udp://dns.alidns.com:53",
-    val foreignUpstream: String = "tcp+udp://dns.google:53",
+    // Android's dae build resolves hostname upstreams through the bootstrap
+    // resolver it also needs for node domains. IP literals keep DNS working
+    // even when that bootstrap lookup is degraded on cellular networks.
+    val domesticUpstream: String = "udp://119.29.29.29:53",
+    val foreignUpstream: String = "tcp+udp://8.8.8.8:53",
     val useDomesticForCn: Boolean = true,
 )
 

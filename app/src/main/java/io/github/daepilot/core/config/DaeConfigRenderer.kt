@@ -91,18 +91,24 @@ object DaeConfigRenderer {
         append("  dial_mode: ").append(safeDialMode(spec.dialMode)).append('\n')
         append("  allow_insecure: false\n")
         append("  tcp_check_url: 'http://cp.cloudflare.com,1.1.1.1,2606:4700:4700::1111'\n")
-        append("  udp_check_dns: 'dns.google:53,8.8.8.8,2001:4860:4860::8888'\n")
+        // Keep health checks on IP literals: hostname checks need the same
+        // bootstrap resolver as node domains, which can deadlock on Android.
+        append("  udp_check_dns: '8.8.8.8,2001:4860:4860::8888'\n")
         append("  check_interval: 30s\n")
         append("  check_tolerance: 50ms\n")
         append("  sniffing_timeout: 30ms\n")
         append("  tls_implementation: tls\n")
         append("  so_mark_from_dae: 0x100\n")
+        // No bootstrap_resolver: dae then resolves node domains with the Go
+        // resolver, which reads the chroot's /etc/resolv.conf. daepilotctl
+        // fills that file from the active network (run/dns.servers), while a
+        // hardcoded public resolver is dropped by many cellular carriers.
         append("}\n\n")
     }
 
     private fun StringBuilder.appendDns(dns: DnsConfig) {
-        val domestic = dns.domesticUpstream.ifBlank { "udp://dns.alidns.com:53" }
-        val foreign = dns.foreignUpstream.ifBlank { "tcp+udp://dns.google:53" }
+        val domestic = dns.domesticUpstream.ifBlank { "udp://119.29.29.29:53" }
+        val foreign = dns.foreignUpstream.ifBlank { "tcp+udp://8.8.8.8:53" }
         append("dns {\n")
         append("  upstream {\n")
         append("    alidns: '").append(escapeSingleQuoted(domestic)).append("'\n")
