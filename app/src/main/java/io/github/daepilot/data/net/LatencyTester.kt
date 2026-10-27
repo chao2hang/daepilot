@@ -69,6 +69,9 @@ class LatencyTester(
     }
 
     private fun probeIcmp(nodeId: String, host: String): LatencyResult {
+        if (host.isBlank() || host.startsWith("-")) {
+            return LatencyResult(nodeId, null, "节点地址无效")
+        }
         val commands = buildList {
             if (host.contains(':')) add(listOf("ping6", "-c", "1", "-W", "2", host))
             add(listOf("ping", "-c", "1", "-W", "2", host))

@@ -34,6 +34,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,6 +70,7 @@ fun RoutingScreen(
     busy: Boolean,
 ) {
     var showPreview by remember { mutableStateOf(false) }
+    var previewText by remember { mutableStateOf<String?>(null) }
     var ruleEditor by remember { mutableStateOf<RoutingRule?>(null) }
     var showRuleEditor by remember { mutableStateOf(false) }
     var showGroupEditor by remember { mutableStateOf(false) }
@@ -246,10 +248,18 @@ fun RoutingScreen(
     }
 
     if (showPreview) {
-        ConfigPreviewDialog(
-            config = viewModel.previewConfig(),
-            onDismiss = { showPreview = false },
-        )
+        // Rendering walks every node link, so it happens off the composition thread
+        // and only while the dialog is open.
+        LaunchedEffect(snapshot) { previewText = viewModel.previewConfig() }
+        previewText?.let { config ->
+            ConfigPreviewDialog(
+                config = config,
+                onDismiss = {
+                    showPreview = false
+                    previewText = null
+                },
+            )
+        }
     }
 
     if (showRuleEditor) {

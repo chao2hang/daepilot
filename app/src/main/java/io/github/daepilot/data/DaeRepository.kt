@@ -61,9 +61,29 @@ class DaeRepository(
         subscriptions,
         nodes,
         userConfig,
-    ) { subs, nodeList, config ->
+    ) { subs, nodeList, config -> buildSnapshot(subs, nodeList, config) }
+        .stateIn(scope, SharingStarted.WhileSubscribed(5_000), AppSnapshot())
+
+    /**
+     * Snapshot read straight from the stores. [snapshot] is fed by Room/DataStore
+     * invalidation, so it still holds the pre-write state right after a mutator
+     * returns — rendering a live config from it can reload dae with stale rules.
+     */
+    suspend fun snapshotNow(): AppSnapshot = withContext(Dispatchers.IO) {
+        buildSnapshot(
+            subscriptionDao.getAll().map { it.toModel() },
+            nodeDao.getAll().map { it.toModel() },
+            settingsStore.current(),
+        )
+    }
+
+    private fun buildSnapshot(
+        subs: List<Subscription>,
+        nodeList: List<Node>,
+        config: UserConfig,
+    ): AppSnapshot {
         val selected = config.selectedNodeId?.takeIf { id -> nodeList.any { it.id == id } }
-        AppSnapshot(
+        return AppSnapshot(
             subscriptions = subs,
             nodes = nodeList,
             groups = config.groups,
@@ -73,7 +93,7 @@ class DaeRepository(
             settings = config.settings,
             dns = config.dns,
         )
-    }.stateIn(scope, SharingStarted.WhileSubscribed(5_000), AppSnapshot())
+    }
 
     suspend fun addSubscription(name: String, url: String, enabled: Boolean = true): ImportResult {
         val trimmedUrl = url.trim()
@@ -214,11 +234,16 @@ class DaeRepository(
     }
 
     suspend fun deleteSubscription(id: String) = withContext(Dispatchers.IO) {
-        nodeDao.deleteBySubscription(id)
-        subscriptionDao.delete(id)
-        val remaining = nodeDao.getAll().map { it.id }.toSet()
-        settingsStore.update { config ->
-            config.copy(selectedNodeId = config.selectedNodeId?.takeIf { it in remaining })
+        // One transaction: a crash between the two deletes would leave the
+        // subscription's nodes orphaned, and renderSpec still emits nodes whose
+        // subscription row is gone.
+        db.withTransaction {
+            nodeDao.deleteBySubscription(id)
+            subscriptionDao.delete(id)
+        }
+        val selected = settingsStore.current().selectedNodeId
+        if (selected != null && !nodeDao.exists(selected)) {
+            settingsStore.update { it.copy(selectedNodeId = null) }
         }
     }
 

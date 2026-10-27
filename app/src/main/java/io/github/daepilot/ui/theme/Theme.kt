@@ -6,6 +6,7 @@ import android.content.ContextWrapper
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -179,11 +180,16 @@ fun DaePilotTheme(
             }
         }
     }
+    val colorScheme = if (dark) DarkScheme else LightScheme
     CompositionLocalProvider(
         LocalDaeGlassPalette provides if (dark) DarkGlassPalette else LightGlassPalette,
+        // The app draws on a transparent Scaffold, so no Surface seeds the content
+        // color. Without this, Text/Icon that skip an explicit color resolve to
+        // Color.Unspecified and render black-on-black in dark mode.
+        LocalContentColor provides colorScheme.onBackground,
     ) {
         MaterialTheme(
-            colorScheme = if (dark) DarkScheme else LightScheme,
+            colorScheme = colorScheme,
             typography = DaePilotTypography,
             shapes = DaePilotShapes,
             content = content,

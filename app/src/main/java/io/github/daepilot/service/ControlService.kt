@@ -17,6 +17,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -27,12 +29,13 @@ class ControlService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var container: AppContainer
     private var pollJob: Job? = null
-    private var lastStatus = DaemonStatus()
+    private val notificationMutex = Mutex()
+    private var lastNotifiedKey: String? = null
 
     override fun onCreate() {
         super.onCreate()
         container = (application as DaePilotApp).container
-        val notification = NotificationHelper.controlNotification(this, lastStatus)
+        val notification = NotificationHelper.controlNotification(this, DaemonStatus())
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NotificationHelper.CONTROL_NOTIFICATION_ID,
@@ -84,15 +87,31 @@ class ControlService : Service() {
                 DaemonStatus(lastError = "无法读取 daemon 状态"),
             )
         }
+        val key = notificationKey(status)
         // Reposting an identical notification every 15 s keeps waking the
-        // notification pipeline (and relights the screen LED on some ROMs).
-        if (status == lastStatus) return
-        lastStatus = status
-        runCatching {
-            NotificationManagerCompat.from(this).notify(
-                NotificationHelper.CONTROL_NOTIFICATION_ID,
-                NotificationHelper.controlNotification(this, status),
-            )
+        // notification pipeline (and relights the screen LED on some ROMs). The
+        // key ignores the fields that move on every poll: startedAt and rss_kb.
+        notificationMutex.withLock {
+            if (key == lastNotifiedKey) return
+            lastNotifiedKey = key
+            runCatching {
+                NotificationManagerCompat.from(this).notify(
+                    NotificationHelper.CONTROL_NOTIFICATION_ID,
+                    NotificationHelper.controlNotification(this, status),
+                )
+            }
+        }
+    }
+
+    private fun notificationKey(status: DaemonStatus): String {
+        val uptimeMinutes = if (status.running && status.startedAt > 0) {
+            ((System.currentTimeMillis() - status.startedAt) / 60_000).coerceAtLeast(0L)
+        } else {
+            0L
+        }
+        return with(status) {
+            "$running|$pid|$version|$configValid|$lastError|$mode|$bootEnabled|$watchdog|" +
+                "$desiredRunning|$wan|$wanIp|$node|$dns|$dnsMode|$ipv6Mode|$uptimeMinutes"
         }
     }
 

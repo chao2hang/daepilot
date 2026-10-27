@@ -10,6 +10,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import io.github.daepilot.BuildConfig
 import io.github.daepilot.DaePilotApp
+import io.github.daepilot.core.config.ConfigRedactor
+import io.github.daepilot.core.config.DaeConfigRenderer
 import io.github.daepilot.core.model.AppSettings
 import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
@@ -17,13 +19,13 @@ import io.github.daepilot.core.model.DnsConfig
 import io.github.daepilot.core.model.OutboundGroup
 import io.github.daepilot.core.model.RoutingRule
 import io.github.daepilot.core.model.RoutingTemplate
-import io.github.daepilot.core.config.ConfigRedactor
 import io.github.daepilot.data.ImportResult
 import io.github.daepilot.core.root.ActionResult
 import io.github.daepilot.core.root.RootRequestResult
 import io.github.daepilot.data.net.LogUploadRequest
 import io.github.daepilot.data.net.LogUploader
 import io.github.daepilot.service.ControlService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -34,7 +36,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
@@ -87,8 +89,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var logJob: Job? = null
     private var statusJob: Job? = null
     // `status()` shells out to root with a 20 s timeout while the poller fires
-    // every 12 s; without this mutex manual refreshes and polls pile up on the
-    // root shell and each call queues behind the previous ones.
+    // every 12 s; refreshes are skipped rather than queued behind the call that is
+    // already running, so waiters can never pile up on the root shell.
     private val statusMutex = Mutex()
     private val recentEvents = ArrayDeque<String>()
     private val eventTime = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -150,110 +152,134 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun ensureForegroundService() {
-        if (!snapshot.value.settings.keepServiceRunning) return
-        runCatching {
-            ContextCompat.startForegroundService(
-                getApplication(),
-                Intent(getApplication(), ControlService::class.java),
-            )
+        viewModelScope.launch {
+            // The debounced snapshot still holds the initial AppSnapshot() during
+            // cold start, whose keepServiceRunning default would restart the
+            // service for users who turned it off.
+            if (!repo.snapshotNow().settings.keepServiceRunning) return@launch
+            runCatching {
+                ContextCompat.startForegroundService(
+                    getApplication(),
+                    Intent(getApplication(), ControlService::class.java),
+                )
+            }
         }
     }
 
     fun refreshStatus() {
         viewModelScope.launch {
-            statusMutex.withLock {
+            // Skip while a read is already in flight: the poller would otherwise
+            // stack waiters behind a root command that can take the full timeout.
+            if (!statusMutex.tryLock()) return@launch
+            try {
                 _status.value = runCatching { daemon.status() }.getOrElse {
                     DaemonStatus(lastError = it.message ?: "状态读取失败")
                 }
+            } finally {
+                statusMutex.unlock()
             }
         }
     }
 
-    fun diagnose() = viewModelScope.launch {
+    /** Keeps [busy] recoverable: a throw inside [block] must not park every button. */
+    private suspend fun withBusy(block: suspend () -> Unit) {
         _busy.value = true
-        _compatibility.value = runCatching { daemon.diagnose() }.getOrElse {
-            CompatibilityReport(rootAvailable = false, note = it.message ?: "诊断失败")
+        try {
+            block()
+        } finally {
+            _busy.value = false
         }
-        _busy.value = false
+    }
+
+    fun diagnose() = viewModelScope.launch {
+        withBusy {
+            _compatibility.value = runCatching { daemon.diagnose() }.getOrElse {
+                CompatibilityReport(rootAvailable = false, note = it.message ?: "诊断失败")
+            }
+        }
     }
 
     fun toggleProxy(enable: Boolean) = viewModelScope.launch {
-        _busy.value = true
-        try {
+        withBusy {
             if (enable) {
                 if (!container.root.hasRootShell() &&
                     !requestRootInternal(installModule = true)
                 ) {
-                    return@launch
+                    return@withBusy
                 }
-                val spec = repo.renderSpec(snapshot.value)
+                // Rendered from a fresh store read: snapshot.value still holds the
+                // previous state right after an edit, which would make dae reload
+                // the config the user just changed away from.
+                val snap = repo.snapshotNow()
+                val spec = repo.renderSpec(snap)
                 if (spec.nodes.isEmpty() && spec.template != RoutingTemplate.DIRECT) {
                     notify("请先导入并启用至少一个节点")
-                    return@launch
+                    return@withBusy
                 }
-                val rendered = repo.render(snapshot.value)
-                val applied = daemon.applyConfig(rendered, reload = _status.value.running)
+                val applied = daemon.applyConfig(
+                    DaeConfigRenderer.render(spec),
+                    reload = _status.value.running,
+                )
                 if (!applied.ok) {
                     notify("无法应用配置：${applied.message}")
-                    return@launch
+                    return@withBusy
                 }
                 val started = daemon.start()
                 if (!started.ok) {
                     notify("启动失败：${started.message}")
-                } else if (snapshot.value.settings.bootStart) {
+                } else if (snap.settings.bootStart) {
                     daemon.enableBootStart()
                 }
             } else {
                 val stopped = daemon.stop()
                 notify(if (stopped.ok) "dae 已停止" else "停止失败：${stopped.message}")
             }
-        } finally {
-            _busy.value = false
-            refreshStatus()
         }
+        refreshStatus()
     }
 
     fun applyConfig() = viewModelScope.launch {
-        _busy.value = true
-        try {
-            val rendered = repo.render(snapshot.value)
-            val result = daemon.applyConfig(rendered, reload = _status.value.running)
+        withBusy {
+            val result = daemon.applyConfig(
+                repo.render(repo.snapshotNow()),
+                reload = _status.value.running,
+            )
             notify(if (result.ok) "配置已应用：${result.message}" else "应用失败：${result.message}")
-        } finally {
-            _busy.value = false
-            refreshStatus()
         }
+        refreshStatus()
     }
 
     private suspend fun applyIfRunning() {
         if (!_status.value.running) return
-        val rendered = repo.render(snapshot.value)
+        val rendered = repo.render(repo.snapshotNow())
         val result = daemon.applyConfig(rendered, reload = true)
         if (!result.ok) notify("热更新失败：${result.message}")
     }
 
-    fun previewConfig(): String = repo.render(snapshot.value)
+    suspend fun previewConfig(): String = withContext(Dispatchers.Default) {
+        repo.render(repo.snapshotNow())
+    }
 
     fun reloadConfig() = viewModelScope.launch {
-        _busy.value = true
-        val result = daemon.reload()
-        notify(if (result.ok) "配置已热重载" else "热重载失败：${result.message}")
-        _busy.value = false
+        withBusy {
+            val result = daemon.reload()
+            notify(if (result.ok) "配置已热重载" else "热重载失败：${result.message}")
+        }
         refreshStatus()
     }
 
     fun addSubscription(name: String, url: String) = viewModelScope.launch {
-        _busy.value = true
-        val result = repo.addSubscription(name, url)
-        notify(describeImport(result))
-        _busy.value = false
+        withBusy {
+            val result = repo.addSubscription(name, url)
+            notify(describeImport(result))
+        }
     }
 
     fun refreshSubscription(id: String) = viewModelScope.launch {
-        _busy.value = true
-        val result = repo.refreshSubscription(id, force = true)
-        notify(describeImport(result))
-        _busy.value = false
+        withBusy {
+            val result = repo.refreshSubscription(id, force = true)
+            notify(describeImport(result))
+        }
         applyIfRunning()
     }
 
@@ -273,10 +299,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importLinks(text: String, namePrefix: String?) = viewModelScope.launch {
-        _busy.value = true
-        val result = repo.importLinks(text, namePrefix)
-        notify(describeImport(result))
-        _busy.value = false
+        withBusy {
+            val result = repo.importLinks(text, namePrefix)
+            notify(describeImport(result))
+        }
     }
 
     fun deleteNode(id: String) = viewModelScope.launch {
@@ -295,15 +321,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun testAllNodes() = viewModelScope.launch {
-        _busy.value = true
-        val results = repo.testAllNodes()
-        val ok = results.count { it.latencyMs != null }
-        val icmp = results.count { it.method == "icmp" && it.latencyMs != null }
-        notify(
-            "延迟测试完成：$ok/${results.size} 可用" +
-                if (icmp > 0) "，其中 $icmp 个 QUIC 节点使用 ICMP" else "",
-        )
-        _busy.value = false
+        withBusy {
+            val results = repo.testAllNodes()
+            val ok = results.count { it.latencyMs != null }
+            val icmp = results.count { it.method == "icmp" && it.latencyMs != null }
+            notify(
+                "延迟测试完成：$ok/${results.size} 可用" +
+                    if (icmp > 0) "，其中 $icmp 个 QUIC 节点使用 ICMP" else "",
+            )
+        }
     }
 
     fun testNode(id: String) = viewModelScope.launch {
@@ -471,8 +497,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         recordEvent("上传运行日志")
         val status = _status.value
+        // Rendering the whole config walks every node link (base64 + canonicalize);
+        // keep it off the main thread and read the stores, not the debounced snapshot.
         val configText = runCatching {
-            ConfigRedactor.redact(repo.render(snapshot.value))
+            withContext(Dispatchers.Default) {
+                ConfigRedactor.redact(repo.render(repo.snapshotNow()))
+            }
         }.getOrElse {
             "配置渲染失败：${it.message ?: it.javaClass.simpleName}"
         }
@@ -539,18 +569,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startDaemonFromQuickAction() = viewModelScope.launch {
-        _busy.value = true
-        val result = daemon.start()
-        notify(if (result.ok) "dae 已启动" else "启动失败：${result.message}")
-        _busy.value = false
+        withBusy {
+            val result = daemon.start()
+            notify(if (result.ok) "dae 已启动" else "启动失败：${result.message}")
+        }
         refreshStatus()
     }
 
     fun stopDaemonFromQuickAction() = viewModelScope.launch {
-        _busy.value = true
-        val result = daemon.stop()
-        notify(if (result.ok) "dae 已停止" else "停止失败：${result.message}")
-        _busy.value = false
+        withBusy {
+            val result = daemon.stop()
+            notify(if (result.ok) "dae 已停止" else "停止失败：${result.message}")
+        }
         refreshStatus()
     }
 

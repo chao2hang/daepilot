@@ -9,6 +9,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import io.github.daepilot.core.model.UserConfig
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
 
@@ -30,6 +31,9 @@ class SettingsStore(private val context: Context) {
                 runCatching { json.decodeFromString<UserConfig>(raw) }.getOrNull()
             } ?: UserConfig()
         }
+
+    /** Latest committed config, without waiting for the collector of [config]. */
+    suspend fun current(): UserConfig = config.first()
 
     suspend fun update(transform: (UserConfig) -> UserConfig) {
         context.configDataStore.edit { prefs ->

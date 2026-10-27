@@ -6,6 +6,8 @@ import android.net.Network
 import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -23,6 +25,14 @@ class DaemonController(
     private val root: RootShell,
 ) {
     private val checker = CompatibilityChecker(root)
+
+    // The service poller, the notification actions and the UI all share one cached
+    // root shell. Without this, a toggle from the notification and a toggle from
+    // the screen can both run `daepilotctl start`, and an apply can interleave
+    // with a stop.
+    private val controlMutex = Mutex()
+
+    private suspend fun <T> controlled(block: suspend () -> T): T = controlMutex.withLock { block() }
 
     suspend fun isModuleInstalled(): Boolean = root.exists(DaePaths.MODULE_PROP)
 
@@ -66,25 +76,27 @@ class DaemonController(
 
     suspend fun applyConfig(config: String, reload: Boolean = true): ActionResult =
         withContext(Dispatchers.IO) {
-            if (!root.isRootAvailable()) {
-                return@withContext ActionResult(false, "未获得 root 权限")
+            controlled {
+                if (!root.isRootAvailable()) {
+                    return@controlled ActionResult(false, "未获得 root 权限")
+                }
+                if (!isModuleInstalled()) {
+                    return@controlled ActionResult(false, "尚未安装 DaePilot Magisk 模块")
+                }
+                if (!root.writeFile(DaePaths.STAGING, config, "600")) {
+                    return@controlled ActionResult(false, "无法写入暂存配置（$DaePaths.STAGING）")
+                }
+                syncDnsServers()
+                val flag = if (reload) " --reload" else ""
+                val result = root.run(
+                    "${DaePaths.CTL} apply ${RootShell.quote(DaePaths.STAGING)}$flag 2>&1",
+                    timeoutMs = 150_000,
+                )
+                val message = result.out.ifBlank { result.err }.trim().ifBlank {
+                    if (result.ok) "配置已应用" else "配置应用失败"
+                }
+                ActionResult(result.ok, message)
             }
-            if (!isModuleInstalled()) {
-                return@withContext ActionResult(false, "尚未安装 DaePilot Magisk 模块")
-            }
-            if (!root.writeFile(DaePaths.STAGING, config, "600")) {
-                return@withContext ActionResult(false, "无法写入暂存配置（$DaePaths.STAGING）")
-            }
-            syncDnsServers()
-            val flag = if (reload) " --reload" else ""
-            val result = root.run(
-                "${DaePaths.CTL} apply ${RootShell.quote(DaePaths.STAGING)}$flag 2>&1",
-                timeoutMs = 150_000,
-            )
-            val message = result.out.ifBlank { result.err }.trim().ifBlank {
-                if (result.ok) "配置已应用" else "配置应用失败"
-            }
-            ActionResult(result.ok, message)
         }
 
     suspend fun readLog(lines: Int = 300): String = withContext(Dispatchers.IO) {
@@ -107,42 +119,44 @@ class DaemonController(
     }
 
     suspend fun installBundledModule(): ActionResult = withContext(Dispatchers.IO) {
-        if (!root.isRootAvailable()) return@withContext ActionResult(false, "未获得 root 权限")
-        val zip = File(context.cacheDir, "daepilot-module.zip")
-        val copied = runCatching {
-            context.assets.open(DaePaths.MODULE_ASSET).use { input ->
-                zip.outputStream().use { output -> input.copyTo(output) }
+        controlled {
+            if (!root.isRootAvailable()) return@controlled ActionResult(false, "未获得 root 权限")
+            val zip = File(context.cacheDir, "daepilot-module.zip")
+            val copied = runCatching {
+                context.assets.open(DaePaths.MODULE_ASSET).use { input ->
+                    zip.outputStream().use { output -> input.copyTo(output) }
+                }
+            }.isSuccess
+            if (!copied || zip.length() < 1024) {
+                return@controlled ActionResult(
+                    false,
+                    "安装包内置模块缺失，请在 Releases 下载 daepilot-module.zip 后通过 Magisk 刷入",
+                )
             }
-        }.isSuccess
-        if (!copied || zip.length() < 1024) {
-            return@withContext ActionResult(
-                false,
-                "安装包内置模块缺失，请在 Releases 下载 daepilot-module.zip 后通过 Magisk 刷入",
-            )
-        }
-        val quoted = RootShell.quote(zip.absolutePath)
-        val script = """
-            if [ -x /data/adb/ksu/bin/ksud ]; then
-              /data/adb/ksu/bin/ksud module install $quoted && echo INSTALLED=ksu
-            elif command -v magisk >/dev/null 2>&1; then
-              magisk --install-module $quoted && echo INSTALLED=magisk
-            elif command -v apd >/dev/null 2>&1; then
-              apd module install $quoted && echo INSTALLED=apatch
-            else
-              echo "NO_INSTALLER=1"
-            fi
-        """.trimIndent()
-        val result = root.run(script, timeoutMs = 180_000)
-        when {
-            result.out.contains("INSTALLED=") -> ActionResult(
-                true,
-                "模块已安装，重启设备后生效。重启前请先确保已授予 root 权限。",
-            )
-            result.out.contains("NO_INSTALLER=1") -> ActionResult(
-                false,
-                "未找到 Magisk / KernelSU / APatch 安装器，请手动在管理器中刷入模块 zip",
-            )
-            else -> ActionResult(false, result.out.ifBlank { result.err }.trim().ifBlank { "模块安装失败" })
+            val quoted = RootShell.quote(zip.absolutePath)
+            val script = """
+                if [ -x /data/adb/ksu/bin/ksud ]; then
+                  /data/adb/ksu/bin/ksud module install $quoted && echo INSTALLED=ksu
+                elif command -v magisk >/dev/null 2>&1; then
+                  magisk --install-module $quoted && echo INSTALLED=magisk
+                elif command -v apd >/dev/null 2>&1; then
+                  apd module install $quoted && echo INSTALLED=apatch
+                else
+                  echo "NO_INSTALLER=1"
+                fi
+            """.trimIndent()
+            val result = root.run(script, timeoutMs = 180_000)
+            when {
+                result.out.contains("INSTALLED=") -> ActionResult(
+                    true,
+                    "模块已安装，重启设备后生效。重启前请先确保已授予 root 权限。",
+                )
+                result.out.contains("NO_INSTALLER=1") -> ActionResult(
+                    false,
+                    "未找到 Magisk / KernelSU / APatch 安装器，请手动在管理器中刷入模块 zip",
+                )
+                else -> ActionResult(false, result.out.ifBlank { result.err }.trim().ifBlank { "模块安装失败" })
+            }
         }
     }
 
@@ -153,19 +167,22 @@ class DaemonController(
         return out.contains("alive")
     }
 
-    private suspend fun runCtl(command: String, timeoutMs: Long = 30_000): ActionResult {
-        if (!root.isRootAvailable()) return ActionResult(false, "未获得 root 权限")
-        if (!isModuleInstalled()) return ActionResult(false, "尚未安装 DaePilot Magisk 模块")
-        if (!root.exists(DaePaths.CTL)) return ActionResult(false, "模块控制脚本缺失，请重新刷入模块")
-        if (command == "start" || command == "reload") syncDnsServers()
-        // Merge stderr into stdout: daepilotctl's fail() writes diagnostics to
-        // stderr, and libsu captures the streams separately — without this the
-        // app would show a generic "执行失败" instead of the real reason
-        // (e.g. "配置校验失败：<dae output>").
-        val result = root.run("${DaePaths.CTL} $command 2>&1", timeoutMs = timeoutMs)
-        val text = result.out.ifBlank { result.err }.trim()
-        return ActionResult(result.ok, text.ifBlank { if (result.ok) "完成" else "执行失败" })
-    }
+    private suspend fun runCtl(command: String, timeoutMs: Long = 30_000): ActionResult =
+        controlled {
+            if (!root.isRootAvailable()) return@controlled ActionResult(false, "未获得 root 权限")
+            if (!isModuleInstalled()) return@controlled ActionResult(false, "尚未安装 DaePilot Magisk 模块")
+            if (!root.exists(DaePaths.CTL)) {
+                return@controlled ActionResult(false, "模块控制脚本缺失，请重新刷入模块")
+            }
+            if (command == "start" || command == "reload") syncDnsServers()
+            // Merge stderr into stdout: daepilotctl's fail() writes diagnostics to
+            // stderr, and libsu captures the streams separately — without this the
+            // app would show a generic "执行失败" instead of the real reason
+            // (e.g. "配置校验失败：<dae output>").
+            val result = root.run("${DaePaths.CTL} $command 2>&1", timeoutMs = timeoutMs)
+            val text = result.out.ifBlank { result.err }.trim()
+            ActionResult(result.ok, text.ifBlank { if (result.ok) "完成" else "执行失败" })
+        }
 
     /**
      * Publishes the active network's resolvers for dae's bootstrap resolver.

@@ -86,6 +86,9 @@ interface NodeDao {
     @Query("SELECT COUNT(*) FROM nodes WHERE subscriptionId = :subscriptionId")
     suspend fun countBySubscription(subscriptionId: String): Int
 
+    @Query("SELECT EXISTS(SELECT 1 FROM nodes WHERE id = :id)")
+    suspend fun exists(id: String): Boolean
+
     @Upsert
     suspend fun upsertAll(entities: List<NodeEntity>)
 
