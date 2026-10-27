@@ -123,7 +123,13 @@ case "$1" in
       del) exit 1 ;; # no rule present -> like real ip when the list is empty
       *)
         if [ "$family" != "-6" ]; then
-          if [ "${FAKE_MOBILE:-0}" = "1" ]; then
+          if [ "${FAKE_VPN:-0}" = "1" ]; then
+            printf '0:\tfrom all lookup local\n'
+            printf '11000:\tfrom all iif lo oif dummy0 lookup dummy0\n'
+            printf '11100:\tfrom all lookup tun0\n'
+            printf '11200:\tfrom all lookup rmnet_data3\n'
+            printf '32000:\tfrom all unreachable\n'
+          elif [ "${FAKE_MOBILE:-0}" = "1" ]; then
             printf '0:\tfrom all lookup local\n'
             printf '9900:\tfrom all fwmark 0x100/0x1ffff lookup rmnet_data3\n'
             printf '11000:\tfrom all iif lo oif rmnet_data3 uidrange 0-0 lookup rmnet_data3\n'
@@ -137,7 +143,22 @@ case "$1" in
         ;;
     esac ;;
   route)
+    if [ "$family" = "-6" ]; then
+      [ "${FAKE_IPV6:-0}" = "1" ] && echo "default via fe80::1 dev eth0"
+      exit 0
+    fi
     case "$*" in
+      "route get "*|*" route get "*)
+        if [ "${FAKE_VPN:-0}" = "1" ]; then
+          echo "1.1.1.1 via 10.8.0.1 dev tun0 src 10.8.0.2"
+        elif [ "${FAKE_MOBILE:-0}" = "1" ]; then
+          echo "1.1.1.1 via 10.0.0.1 dev rmnet_data3 src 10.0.0.2"
+        else
+          echo "1.1.1.1 via 192.0.2.1 dev eth0 src 192.0.2.2"
+        fi
+        exit 0 ;;
+      *table\ dummy0*) echo "default via 10.255.0.1 dev dummy0" ;;
+      *table\ tun0*) echo "default via 10.8.0.1 dev tun0" ;;
       *table\ rmnet_data3*) echo "default via 10.0.0.1 dev rmnet_data3" ;;
       *table\ main*) echo "default via 192.0.2.1 dev eth0" ;;
       *) : ;;
@@ -145,12 +166,14 @@ case "$1" in
   link)
     case "$*" in
       *rmnet_data3*) echo "3: rmnet_data3: <UP,LOWER_UP> mtu 1500 state UNKNOWN mode DEFAULT" ;;
+      *tun0*) echo "4: tun0: <UP,LOWER_UP> mtu 1400 state UNKNOWN mode DEFAULT" ;;
       *eth0*) echo "2: eth0: <UP,LOWER_UP> mtu 1500 state UP mode DEFAULT" ;;
     esac ;;
   addr)
     if [ "$family" = "-4" ]; then
       case "$*" in
         *rmnet_data3*) echo "    inet 10.0.0.2/30 scope global rmnet_data3" ;;
+        *tun0*) echo "    inet 10.8.0.2/24 scope global tun0" ;;
         *eth0*) echo "    inet 192.0.2.2/24 scope global eth0" ;;
       esac
     fi ;;
@@ -180,8 +203,17 @@ done
 echo "PING $host (203.0.113.9) 56(84) bytes of data."
 EOF
 
+cat > "$WORK/fakebin/dumpsys" <<'EOF'
+#!/bin/sh
+if [ "${FAKE_DUMPSYS:-0}" = "1" ]; then
+  echo 'NetworkAgentInfo{network{100} lp{{InterfaceName: eth0 DnsAddresses: [ /10.0.2.3, /2001:db8::54 ]}}}'
+fi
+exit 0
+EOF
+
 chmod 755 "$WORK/fakebin/chroot" "$WORK/fakebin/busybox" "$WORK/fakebin/getprop" \
-  "$WORK/fakebin/ip" "$WORK/fakebin/mount" "$WORK/fakebin/mountpoint" "$WORK/fakebin/ping"
+  "$WORK/fakebin/ip" "$WORK/fakebin/mount" "$WORK/fakebin/mountpoint" "$WORK/fakebin/ping" \
+  "$WORK/fakebin/dumpsys"
 
 # --- per-test fixtures ----------------------------------------------------
 
@@ -271,6 +303,9 @@ run_ctl() { # $@ = ctl args; stdout is the ctl stdout, stderr -> $WORK/stderr.tx
     export DAEPILOT_TEST_LOG="$WORK/validated.log"
     export DAEPILOT_TEST_FAIL_RELOAD="${FAIL_RELOAD:-}"
     export FAKE_MOBILE="${FAKE_MOBILE:-}"
+    export FAKE_VPN="${FAKE_VPN:-}"
+    export FAKE_IPV6="${FAKE_IPV6:-}"
+    export FAKE_DUMPSYS="${FAKE_DUMPSYS:-}"
     sh "$CTL_UNDER_TEST" "$@" 2>"$WORK/stderr.txt"
   )
 }
@@ -413,6 +448,93 @@ assert_eq "$rc" "0" "apply with cellular policy routing succeeds"
 assert_contains "$BASE/rootfs/config/config.dae" "wan_interface: rmnet_data3" \
   "auto WAN resolves the cellular interface"
 FAKE_MOBILE=""
+
+# 12. Live dumpsys DNS must win over a stale app-published list, and IPv6
+#     nameservers must be dropped when there is no IPv6 default route.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+mkdir -p "$BASE/run"
+printf '1.1.1.1\n2001:db8::53\n' > "$BASE/run/dns.servers"
+FAKE_DUMPSYS=1
+FAKE_IPV6=0
+printf 'global {\n  log_level: info\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with live and stale resolvers succeeds"
+assert_eq "$(head -n 1 "$BASE/rootfs/etc/resolv.conf")" "nameserver 10.0.2.3" \
+  "live dumpsys resolver wins over the stale app list"
+assert_contains "$BASE/rootfs/etc/resolv.conf" "nameserver 1.1.1.1" \
+  "app resolver remains as a fallback"
+assert_not_contains "$BASE/rootfs/etc/resolv.conf" "2001:db8:" \
+  "IPv6 resolver is dropped without an IPv6 default"
+FAKE_IPV6=1
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with IPv6 default succeeds"
+assert_contains "$BASE/rootfs/etc/resolv.conf" "2001:db8::54" \
+  "IPv6 resolver is kept when IPv6 is available"
+FAKE_DUMPSYS=""
+FAKE_IPV6=""
+
+# 13. Windows CRLF config must still get the auto WAN replaced.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf 'global {\n  wan_interface: auto\r\n}\r\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with CRLF config succeeds"
+assert_contains "$BASE/rootfs/config/config.dae" "wan_interface: eth0" \
+  "CRLF config still gets the detected WAN"
+
+# 14. A VPN tun default must not become dae's WAN.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_VPN=1
+printf 'global {\n  wan_interface: auto\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with a VPN default route succeeds"
+assert_contains "$BASE/rootfs/config/config.dae" "wan_interface: rmnet_data3" \
+  "VPN tun/dummy defaults are skipped in favor of the physical WAN"
+FAKE_VPN=""
+
+# 15. Switching the proxy node must restart dae and re-resolve the new host
+#     instead of hot-reloading with the old pin.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+cat > "$CONF" <<'EOF'
+global {
+  log_level: info
+}
+node {
+  a: 'trojan://pw@a.example:443#a'
+}
+group {
+  proxy {
+    filter: name('a')
+    policy: fixed(0)
+  }
+}
+EOF
+launch_daemon
+cat > "$BASE/staging/config.dae" <<'EOF'
+global {
+  log_level: info
+}
+node {
+  b: 'trojan://pw@b.example:443#b'
+}
+group {
+  proxy {
+    filter: name('b')
+    policy: fixed(0)
+  }
+}
+EOF
+out="$(run_ctl apply "$BASE/staging/config.dae" --reload)"; rc=$?
+assert_eq "$rc" "0" "node switch apply succeeds"
+printf '%s
+' "$out" > "$WORK/node-switch.out"
+assert_contains "$WORK/node-switch.out" "节点服务器已变化" "node switch triggers a restart"
+assert_contains "$BASE/rootfs/etc/hosts" "203.0.113.9 b.example" \
+  "new node host is pinned after the restart"
+kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null; DAEMON_PID=""
 
 # 8. The chroot must live in a private mount namespace and never unmount
 #    host-visible mounts (the /dev/binderfs regression).

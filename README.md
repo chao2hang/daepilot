@@ -132,6 +132,10 @@ Magisk 管理器中的模块「动作」按钮可直接启停 dae。
 - hysteria2 / TUIC 走 QUIC，蜂窝链路丢包会同时拖慢所有 QUIC 客户端。实测 15% 丢包时独立 hysteria 客户端与 dae 一起掉到几十 KB/s，属于链路问题而非 dae。
 - `DAE_ALLOW_TCP_SOCKMAP=1` 的 TCP relay eBPF offload 需要支持 inner accounting 的 kprobe ABI；部分内核会以 `attach tcp_offload_sent_account` 失败并回落到用户态转发。实测直连吞吐约 980 KB/s，未成为瓶颈。
 
+## 回归测试覆盖
+
+`sh tools/test-daepilotctl.sh` 目前覆盖：Wi-Fi / 蜂窝 rmnet policy routing、VPN tun/dummy 排除、CRLF 配置、`dumpsys` 的 `/IP` 清洗、无 IPv6 默认路由时过滤 IPv6 DNS、热重载换节点重启、geo 配置损坏回滚、私有 mount namespace、zombie watchdog、节点 hosts pin。模拟器另验证了 Wi-Fi → 移动数据自动切换后 dae 重新绑定并继续代理。
+
 ## 许可
 
 本项目代码以仓库声明为准。模块内分发的 dae 二进制来自 [daeuniverse/dae](https://github.com/daeuniverse/dae)，采用 AGPL-3.0；再分发时请同时提供对应源代码与许可文本。
