@@ -23,6 +23,7 @@ class AppContainer(context: Context) {
     val client = SubscriptionClient()
     val logUploader = LogUploader()
     val repository = DaeRepository(
+        db = db,
         subscriptionDao = db.subscriptionDao(),
         nodeDao = db.nodeDao(),
         settingsStore = settings,

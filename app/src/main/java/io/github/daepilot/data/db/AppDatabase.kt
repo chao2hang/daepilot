@@ -80,6 +80,9 @@ interface NodeDao {
     @Query("SELECT * FROM nodes WHERE subscriptionId = :subscriptionId ORDER BY name COLLATE NOCASE")
     suspend fun getBySubscription(subscriptionId: String): List<NodeEntity>
 
+    @Query("SELECT * FROM nodes WHERE id = :id")
+    suspend fun getById(id: String): NodeEntity?
+
     @Query("SELECT COUNT(*) FROM nodes WHERE subscriptionId = :subscriptionId")
     suspend fun countBySubscription(subscriptionId: String): Int
 

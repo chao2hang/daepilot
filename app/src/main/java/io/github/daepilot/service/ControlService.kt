@@ -84,6 +84,9 @@ class ControlService : Service() {
                 DaemonStatus(lastError = "无法读取 daemon 状态"),
             )
         }
+        // Reposting an identical notification every 15 s keeps waking the
+        // notification pipeline (and relights the screen LED on some ROMs).
+        if (status == lastStatus) return
         lastStatus = status
         runCatching {
             NotificationManagerCompat.from(this).notify(

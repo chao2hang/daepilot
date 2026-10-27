@@ -33,6 +33,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
@@ -84,6 +86,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private var logJob: Job? = null
     private var statusJob: Job? = null
+    // `status()` shells out to root with a 20 s timeout while the poller fires
+    // every 12 s; without this mutex manual refreshes and polls pile up on the
+    // root shell and each call queues behind the previous ones.
+    private val statusMutex = Mutex()
     private val recentEvents = ArrayDeque<String>()
     private val eventTime = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
@@ -155,8 +161,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshStatus() {
         viewModelScope.launch {
-            _status.value = runCatching { daemon.status() }.getOrElse {
-                DaemonStatus(lastError = it.message ?: "状态读取失败")
+            statusMutex.withLock {
+                _status.value = runCatching { daemon.status() }.getOrElse {
+                    DaemonStatus(lastError = it.message ?: "状态读取失败")
+                }
             }
         }
     }

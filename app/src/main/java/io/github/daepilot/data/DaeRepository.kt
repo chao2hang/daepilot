@@ -13,6 +13,8 @@ import io.github.daepilot.core.model.RoutingTemplate
 import io.github.daepilot.core.model.Subscription
 import io.github.daepilot.core.model.UserConfig
 import io.github.daepilot.core.subscription.SubscriptionParser
+import androidx.room.withTransaction
+import io.github.daepilot.data.db.AppDatabase
 import io.github.daepilot.data.db.NodeDao
 import io.github.daepilot.data.db.SubscriptionDao
 import io.github.daepilot.data.net.LatencyResult
@@ -39,6 +41,7 @@ data class ImportResult(
 )
 
 class DaeRepository(
+    private val db: AppDatabase,
     private val subscriptionDao: SubscriptionDao,
     private val nodeDao: NodeDao,
     private val settingsStore: SettingsStore,
@@ -164,8 +167,6 @@ class DaeRepository(
                 )
             }
 
-            nodeDao.deleteBySubscription(id)
-            nodeDao.upsertAll(nodes.map { it.toEntity() })
             val updated = entity.copy(
                 lastUpdatedAt = now,
                 lastError = null,
@@ -177,7 +178,15 @@ class DaeRepository(
                 providerIntervalHours = fetch.providerIntervalHours ?: entity.providerIntervalHours,
                 etag = fetch.etag ?: entity.etag,
             )
-            subscriptionDao.upsert(updated)
+            // Atomic swap: deleting then inserting outside a transaction would
+            // lose every node of this subscription if the process dies in
+            // between. The subscription row update belongs in the same
+            // transaction so counts and node rows can never disagree.
+            db.withTransaction {
+                nodeDao.deleteBySubscription(id)
+                nodeDao.upsertAll(nodes.map { it.toEntity() })
+                subscriptionDao.upsert(updated)
+            }
 
             ImportResult(
                 ok = true,
@@ -312,7 +321,7 @@ class DaeRepository(
     }
 
     suspend fun testNode(id: String): LatencyResult? = withContext(Dispatchers.IO) {
-        val entity = nodeDao.getAll().firstOrNull { it.id == id } ?: return@withContext null
+        val entity = nodeDao.getById(id) ?: return@withContext null
         val result = latencyTester.probe(entity.toModel())
         persistLatency(listOf(result))
         result
@@ -320,8 +329,11 @@ class DaeRepository(
 
     private suspend fun persistLatency(results: List<LatencyResult>) {
         val now = System.currentTimeMillis()
-        results.forEach { result ->
-            nodeDao.updateLatency(result.nodeId, result.latencyMs, if (result.latencyMs != null) now else 0L)
+        // Single transaction instead of one UPDATE round-trip per node.
+        db.withTransaction {
+            results.forEach { result ->
+                nodeDao.updateLatency(result.nodeId, result.latencyMs, if (result.latencyMs != null) now else 0L)
+            }
         }
     }
 
