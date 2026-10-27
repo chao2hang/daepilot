@@ -123,22 +123,36 @@ case "$1" in
       del) exit 1 ;; # no rule present -> like real ip when the list is empty
       *)
         if [ "$family" != "-6" ]; then
-          printf '0:\tfrom all lookup local\n'
-          printf '32766:\tfrom all lookup main\n'
-          printf '32767:\tfrom all lookup default\n'
+          if [ "${FAKE_MOBILE:-0}" = "1" ]; then
+            printf '0:\tfrom all lookup local\n'
+            printf '9900:\tfrom all fwmark 0x100/0x1ffff lookup rmnet_data3\n'
+            printf '11000:\tfrom all iif lo oif rmnet_data3 uidrange 0-0 lookup rmnet_data3\n'
+            printf '32000:\tfrom all unreachable\n'
+          else
+            printf '0:\tfrom all lookup local\n'
+            printf '32766:\tfrom all lookup main\n'
+            printf '32767:\tfrom all lookup default\n'
+          fi
         fi
         ;;
     esac ;;
   route)
     case "$*" in
+      *table\ rmnet_data3*) echo "default via 10.0.0.1 dev rmnet_data3" ;;
       *table\ main*) echo "default via 192.0.2.1 dev eth0" ;;
       *) : ;;
     esac ;;
   link)
-    case "$*" in *eth0*) echo "2: eth0: <UP,LOWER_UP> mtu 1500 state UP mode DEFAULT" ;; esac ;;
+    case "$*" in
+      *rmnet_data3*) echo "3: rmnet_data3: <UP,LOWER_UP> mtu 1500 state UNKNOWN mode DEFAULT" ;;
+      *eth0*) echo "2: eth0: <UP,LOWER_UP> mtu 1500 state UP mode DEFAULT" ;;
+    esac ;;
   addr)
     if [ "$family" = "-4" ]; then
-      case "$*" in *eth0*) echo "    inet 192.0.2.2/24 scope global eth0" ;; esac
+      case "$*" in
+        *rmnet_data3*) echo "    inet 10.0.0.2/30 scope global rmnet_data3" ;;
+        *eth0*) echo "    inet 192.0.2.2/24 scope global eth0" ;;
+      esac
     fi ;;
 esac
 exit 0
@@ -256,6 +270,7 @@ run_ctl() { # $@ = ctl args; stdout is the ctl stdout, stderr -> $WORK/stderr.tx
     export DAEPILOT_TEST_ROOT="$BASE/rootfs"
     export DAEPILOT_TEST_LOG="$WORK/validated.log"
     export DAEPILOT_TEST_FAIL_RELOAD="${FAIL_RELOAD:-}"
+    export FAKE_MOBILE="${FAKE_MOBILE:-}"
     sh "$CTL_UNDER_TEST" "$@" 2>"$WORK/stderr.txt"
   )
 }
@@ -386,6 +401,18 @@ assert_contains "$BASE/rootfs/etc/resolv.conf" "nameserver 10.0.2.3" \
   "leading slash is stripped from the resolver"
 assert_not_contains "$BASE/rootfs/etc/resolv.conf" "nameserver /" \
   "no invalid slash-prefixed resolver is written"
+
+# 11. Cellular policy routing exposes rmnet_data3 instead of the main table;
+#     auto WAN must resolve it too.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_MOBILE=1
+printf 'global {\n  wan_interface: auto\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with cellular policy routing succeeds"
+assert_contains "$BASE/rootfs/config/config.dae" "wan_interface: rmnet_data3" \
+  "auto WAN resolves the cellular interface"
+FAKE_MOBILE=""
 
 # 8. The chroot must live in a private mount namespace and never unmount
 #    host-visible mounts (the /dev/binderfs regression).
