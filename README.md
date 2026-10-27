@@ -52,6 +52,7 @@ Magisk module
 - **内存锁**：启动前把 `RLIMIT_MEMLOCK` 提到 unlimited。Android 默认上限 64 KiB，dae 加载 geoip/geosite 时 LPM map 更新会报 `newLpmMap: batch update: cannot allocate memory` 并直接退出。
 - **DNS 交接**：App 把当前网络的 `LinkProperties.dnsServers` 写入 `run/dns.servers`，`daepilotctl` 再写入 rootfs 的 `/etc/resolv.conf`，供 dae 内 Go resolver 解析节点域名；配置里不再写死 `bootstrap_resolver`。解析器优先使用当前 WAN 的实况 DNS：部分运营商丢弃 `119.29.29.29` 等公共 DNS，只有运营商自己的 DNS 可达，因此内置的国内上游会在落配置时自动替换为当前 WAN 的 DNS。
 - **蜂窝 DNS 回退**：在部分移动网络上，dae 的 DNS 劫持会捕获它自己发往公网 DNS 的查询，导致运营商 DNS 直连超时（原始 UDP 查询正常）。`daepilotctl` 在 WAN 为 `rmnet*` 且存在代理节点时，把 `qname(geosite:cn)` 的解析改走代理的 `googledns`；Wi-Fi 仍使用路由器/运营商 DNS 直连。诊断弹窗会显示当前 WAN、IP、DNS 列表、DNS 模式（直连/国内经代理）、节点与最近错误。
+- **IPv4 节点 AAAA 过滤**：节点没有 IPv6 出口时，Chrome / X 等应用优先使用 AAAA，代理拨号 IPv6 会 `network is unreachable`。存在代理节点时，`daepilotctl` 在 DNS request 中拒绝非国内域名的 AAAA（国内 IPv6 保留），应用自动回退 IPv4；诊断弹窗显示 IPv6 模式。
 - **Resolver 清洗**：Android `dumpsys` 输出的 DNS 形如 `/10.0.2.3`，写入 `resolv.conf` 前会去掉 `/`、方括号和 zone id；否则整份文件非法，dae 的 Go resolver 会回落到 `[::1]:53`，网络检查/节点解析直接失败。
 - **Wi-Fi / 蜂窝双 WAN**：`wan_interface: auto` 由 `daepilotctl` 从 Android policy routing 解析当前默认接口（`wlan0`、`rmnet_dataN` 等），watchdog 检测到接口变化后自动重启 dae，避免 Wi-Fi/移动数据切换后仍绑定旧接口。模拟器上已验证 Wi-Fi → 移动数据切换后自动 `Bind to WAN: eth0` 并继续代理。
 - **rmnet 兼容**：模块自带的 dae payload 使用 L3 WAN egress hook，适配 Android rmnet 的 raw-IP；官方 L2 构建在 rmnet 上抓不到本地流量，因此不要替换移动网络场景下的 payload。
@@ -135,7 +136,7 @@ Magisk 管理器中的模块「动作」按钮可直接启停 dae。
 
 ## 回归测试覆盖
 
-`sh tools/test-daepilotctl.sh` 目前覆盖：Wi-Fi / 蜂窝 rmnet policy routing、VPN tun/dummy 排除、CRLF 配置、`dumpsys` 的 `/IP` 清洗、无 IPv6 默认路由时过滤 IPv6 DNS、运营商 DNS 注入（含移动网络）、自定义上游保留、节点 URL IP 固定、蜂窝国内 DNS 经代理回退、热重载换节点重启、geo 配置损坏回滚、私有 mount namespace、zombie watchdog、节点 hosts pin。真机另验证了蜂窝/Wi-Fi 双向切换、Google/YouTube 代理、节点切换与 5 轮启停后 `/dev/binderfs` 完好。
+`sh tools/test-daepilotctl.sh` 目前覆盖：Wi-Fi / 蜂窝 rmnet policy routing、VPN tun/dummy 排除、CRLF 配置、`dumpsys` 的 `/IP` 清洗、无 IPv6 默认路由时过滤 IPv6 DNS、运营商 DNS 注入（含移动网络）、自定义上游保留、节点 URL IP 固定、蜂窝国内 DNS 经代理回退、非国内 AAAA 过滤、热重载换节点重启、geo 配置损坏回滚、私有 mount namespace、zombie watchdog、节点 hosts pin。真机另验证了蜂窝/Wi-Fi 双向切换、Google/YouTube 代理、节点切换与 5 轮启停后 `/dev/binderfs` 完好。
 
 ## 许可
 

@@ -428,6 +428,25 @@ apply_cellular_dns_mode() {
   fi
 }
 
+# IPv4-only proxies cannot reach IPv6 targets. Chrome prefers AAAA and then
+# hangs on the failed proxy dial (Play Store uses IPv4 and keeps working).
+# Drop AAAA for proxied (non-CN) domains while keeping domestic IPv6 direct.
+apply_ipv4_only_dns() {
+  local file tmp
+  file="$1"
+  grep -q 'qtype(AAAA)' "$file" 2>/dev/null && return 0
+  grep -q 'googledns:' "$file" 2>/dev/null || return 0
+  [ -n "$(proxy_node_hosts "$file" 2>/dev/null)" ] || return 0
+  tmp="$file.aaaa.$$"
+  if sed '/^[[:space:]]*request[[:space:]]*{/a\      qtype(AAAA) && !qname(geosite:cn) -> reject' \
+      "$file" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$file" 2>/dev/null
+    chmod 600 "$file" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+}
+
 stage_config() {
   local src dst wan tmp norm dns1
   src="$1"
@@ -457,6 +476,7 @@ stage_config() {
     if [ -s "$tmp" ] && mv "$tmp" "$dst" 2>/dev/null; then
       pin_node_urls "$dst"
       apply_cellular_dns_mode "$dst" "$wan"
+      apply_ipv4_only_dns "$dst"
       return 0
     fi
     rm -f "$tmp" 2>/dev/null
@@ -464,6 +484,7 @@ stage_config() {
   rm -f "$norm" 2>/dev/null
   cp "$src" "$dst"
   apply_cellular_dns_mode "$dst" "$wan"
+  apply_ipv4_only_dns "$dst"
 }
 
 # Hostnames referenced by the proxy group, one per line. Shared by the hosts
@@ -1205,6 +1226,9 @@ status() {
   dns_mode=direct
   grep -q 'qname(geosite:cn)[[:space:]]*->[[:space:]]*googledns' "$ROOTFS/config/config.dae" 2>/dev/null && dns_mode=proxy
   echo "dns_mode=$dns_mode"
+  ipv6_mode=allow
+  grep -q 'qtype(AAAA)' "$ROOTFS/config/config.dae" 2>/dev/null && ipv6_mode=blocked
+  echo "ipv6_mode=$ipv6_mode"
   echo "mode=chroot"
 }
 

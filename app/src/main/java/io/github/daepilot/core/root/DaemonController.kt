@@ -54,6 +54,7 @@ class DaemonController(
             node = values["node"]?.takeIf { it.isNotBlank() },
             dns = values["dns"]?.takeIf { it.isNotBlank() },
             dnsMode = values["dns_mode"]?.takeIf { it.isNotBlank() },
+            ipv6Mode = values["ipv6_mode"]?.takeIf { it.isNotBlank() },
         )
     }
 

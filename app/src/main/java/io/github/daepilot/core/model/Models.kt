@@ -176,6 +176,7 @@ data class DaemonStatus(
     val node: String? = null,
     val dns: String? = null,
     val dnsMode: String? = null,
+    val ipv6Mode: String? = null,
 )
 
 @Serializable

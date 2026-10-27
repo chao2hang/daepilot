@@ -648,6 +648,8 @@ assert_contains "$BASE/rootfs/config/config.dae" "qname(geosite:cn) -> googledns
   "cellular domestic DNS is routed through the proxy"
 assert_contains "$BASE/rootfs/config/config.dae" "alidns: 'udp://10.2.164.1:53'" \
   "cellular resolver is still injected for other lookups"
+assert_contains "$BASE/rootfs/config/config.dae" "qtype(AAAA) && !qname(geosite:cn) -> reject" \
+  "IPv4-only proxy blocks foreign AAAA lookups"
 FAKE_MOBILE=""
 
 setup_base "$CTL_SRC"
@@ -686,6 +688,8 @@ out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
 assert_eq "$rc" "0" "apply on Wi-Fi with direct DNS succeeds"
 assert_contains "$BASE/rootfs/config/config.dae" "qname(geosite:cn) -> alidns" \
   "Wi-Fi domestic DNS keeps the direct resolver"
+assert_contains "$BASE/rootfs/config/config.dae" "qtype(AAAA) && !qname(geosite:cn) -> reject" \
+  "foreign AAAA lookups are blocked on Wi-Fi too"
 FAKE_MOBILE=""
 FAKE_DUMPSYS=""
 

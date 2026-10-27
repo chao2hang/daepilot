@@ -140,6 +140,10 @@ private fun NetworkSection(status: DaemonStatus) {
         "DNS 模式",
         if (status.dnsMode == "proxy") "国内解析经代理（蜂窝）" else "直连",
     )
+    NetworkRow(
+        "IPv6",
+        if (status.ipv6Mode == "blocked") "已阻止（节点 IPv4）" else "允许",
+    )
     NetworkRow("节点", status.node?.takeIf { it.isNotBlank() } ?: "—")
     status.lastError?.takeIf { it.isNotBlank() }?.let {
         NetworkRow("最近错误", it, error = true)

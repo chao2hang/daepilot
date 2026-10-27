@@ -504,6 +504,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 append("node=${status.node ?: "-"} ")
                 append("dns=${status.dns ?: "-"} ")
                 append("dnsMode=${status.dnsMode ?: "-"} ")
+                append("ipv6Mode=${status.ipv6Mode ?: "-"} ")
                 append("lastError=${status.lastError ?: "-"}")
             },
             note = "manual upload",
