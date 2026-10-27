@@ -40,6 +40,7 @@ CONFIG_OK="$RUN/config.ok"
 LAST_ERROR="$RUN/last_error"
 WAN_FILE="$RUN/wan.interface"
 WAN_AUTO="$RUN/wan.auto"
+NODE_HOSTS_CACHE="$RUN/node.hosts"
 
 BB=""
 for candidate in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /system/xbin/busybox; do
@@ -189,9 +190,9 @@ write_resolv() {
   fi
 
   if [ ! -s "$resolv_tmp" ]; then
-    # Last resort. AliDNS first: 119.29.29.29 times out on cellular networks
-    # that only allow their own resolvers.
-    for ns in 223.5.5.5 223.6.6.6 119.29.29.29 114.114.114.114; do
+    # Last resort. DNSPod first: Alibaba's 223.5.5.5 is dropped on some
+    # cellular networks, while 119.29.29.29 kept answering on those links.
+    for ns in 119.29.29.29 114.114.114.114 223.5.5.5 223.6.6.6; do
       add_nameserver "$ns"
     done
   fi
@@ -280,6 +281,68 @@ stage_config() {
   cp "$src" "$dst"
 }
 
+# Resolve the proxy nodes' server hostnames through Android's system resolver
+# and pin them in the chroot's /etc/hosts. dae's Go resolver then does not need
+# to ask a public resolver for the node, which is what closes the
+# "resolve node -> use proxy -> proxy needs node" loop on cellular networks
+# that drop public DNS.
+write_node_hosts() {
+  local hosts_file cache_tmp filters hosts host ip tag line
+  hosts_file="$ROOTFS/etc/hosts"
+  [ -f "$hosts_file" ] || return 0
+  [ -f "$ROOTFS/config/config.dae" ] || return 0
+
+  # On reload the daemon is already capturing DNS; reuse the pins resolved at
+  # startup instead of probing through the live datapath.
+  if is_running; then
+    [ -s "$NODE_HOSTS_CACHE" ] && cat "$NODE_HOSTS_CACHE" >> "$hosts_file"
+    return 0
+  fi
+
+  cache_tmp="$NODE_HOSTS_CACHE.tmp.$$"
+  : > "$cache_tmp" 2>/dev/null
+
+  # Prefer hosts referenced by the proxy group; a large subscription must not
+  # turn startup into a serial ping storm.
+  filters="$(sed -n '/^[[:space:]]*proxy[[:space:]]*{/,/^[[:space:]]*}/p' \
+      "$ROOTFS/config/config.dae" 2>/dev/null \
+    | sed -n 's/.*filter:[[:space:]]*name(\([^)]*\)).*/\1/p' \
+    | tr ',' '\n' | tr -d "'\" " | sed '/^$/d')"
+  if [ -n "$filters" ]; then
+    hosts=""
+    for tag in $filters; do
+      line="$(grep -m 1 "^[[:space:]]*$tag:" "$ROOTFS/config/config.dae" 2>/dev/null)"
+      [ -n "$line" ] || continue
+      host="$(printf '%s\n' "$line" | sed -n "s/.*@\([^:/?#']*\)[:/].*/\1/p")"
+      [ -n "$host" ] && hosts="$hosts $host"
+    done
+  else
+    hosts="$(sed -n "s/^[[:space:]]*[^:]*:[[:space:]]*'[^']*@\([^:/?#']*\)[:/][^']*'.*/\1/p" \
+      "$ROOTFS/config/config.dae" 2>/dev/null | head -n 4)"
+  fi
+
+  for host in $hosts; do
+    case "$host" in
+      ""|localhost|*[!A-Za-z0-9.-]*) continue ;;
+    esac
+    case "$host" in
+      *[A-Za-z]*) ;;
+      *) continue ;; # already an IP literal
+    esac
+    grep -q "[[:space:]]$host$" "$cache_tmp" 2>/dev/null && continue
+    ip="$(ping -c 1 -W 2 "$host" 2>/dev/null \
+      | sed -n 's/^PING [^(]*(\([0-9a-fA-F:.]*\)).*/\1/p' | head -n 1)"
+    [ -n "$ip" ] && printf '%s %s\n' "$ip" "$host" >> "$cache_tmp"
+  done
+
+  if [ -s "$cache_tmp" ]; then
+    mv "$cache_tmp" "$NODE_HOSTS_CACHE" 2>/dev/null
+    cat "$NODE_HOSTS_CACHE" >> "$hosts_file" 2>/dev/null
+  else
+    rm -f "$cache_tmp" 2>/dev/null
+  fi
+}
+
 prepare_chroot() {
   ensure_layout
   write_resolv
@@ -297,6 +360,7 @@ prepare_chroot() {
     chmod 600 "$ROOTFS/config/config.dae" 2>/dev/null
   fi
   ensure_geodata || return 1
+  write_node_hosts
   chmod 700 "$ROOTFS/config" 2>/dev/null
 }
 
@@ -736,6 +800,7 @@ apply_config() {
   chmod 600 "$CONF" 2>/dev/null
   stage_config "$CONF" "$ROOTFS/config/config.dae" 2>/dev/null
   chmod 600 "$ROOTFS/config/config.dae" 2>/dev/null
+  write_node_hosts
 
   if [ "$do_reload_flag" = "--reload" ] && is_running; then
     if do_reload; then

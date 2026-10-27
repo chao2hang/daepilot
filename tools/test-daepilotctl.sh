@@ -156,8 +156,18 @@ cat > "$WORK/fakebin/mountpoint" <<'EOF'
 exit 1
 EOF
 
+cat > "$WORK/fakebin/ping" <<'EOF'
+#!/bin/sh
+# Only the final operand (the hostname) matters to write_node_hosts().
+host=""
+for arg in "$@"; do
+  case "$arg" in -*) ;; *) host="$arg" ;; esac
+done
+echo "PING $host (203.0.113.9) 56(84) bytes of data."
+EOF
+
 chmod 755 "$WORK/fakebin/chroot" "$WORK/fakebin/busybox" "$WORK/fakebin/getprop" \
-  "$WORK/fakebin/ip" "$WORK/fakebin/mount" "$WORK/fakebin/mountpoint"
+  "$WORK/fakebin/ip" "$WORK/fakebin/mount" "$WORK/fakebin/mountpoint" "$WORK/fakebin/ping"
 
 # --- per-test fixtures ----------------------------------------------------
 
@@ -168,6 +178,13 @@ install_ctl() {
 
 setup_base() { # $1 = ctl source to install
   BASE="$WORK/base"
+  # A previous test may have left a fake daemon whose pid files are about to
+  # be deleted; kill it first so is_running() does not leak across tests.
+  for pf in "$BASE/run/dae.host.pid" "$BASE/rootfs/run/dae.pid"; do
+    [ -s "$pf" ] || continue
+    old_pid="$(tr -dc '0-9' < "$pf" 2>/dev/null)"
+    [ -n "$old_pid" ] && kill -9 "$old_pid" 2>/dev/null
+  done
   rm -rf "$BASE"
   mkdir -p "$BASE/geo" "$BASE/staging" "$BASE/bin" "$BASE/config"
   printf 'GEOSITE-BINARY\n' > "$BASE/geo/geosite.dat"
@@ -337,6 +354,24 @@ assert_eq "$rc" "0" "apply with auto WAN succeeds"
 assert_contains "$CONF" "wan_interface: auto" "source config keeps auto"
 assert_contains "$BASE/rootfs/config/config.dae" "wan_interface: eth0" \
   "chroot config gets the detected WAN"
+
+# 9. Node server hostnames are resolved through the host resolver and pinned
+#    in the chroot hosts file, so dae does not need a public DNS answer to
+#    connect to the node.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+cat > "$BASE/staging/config.dae" <<'EOF'
+global {
+  log_level: info
+}
+node {
+  qxy: 'hysteria2://pw@qxyfoods.com:8443/?insecure=1&sni=qxyfoods.com#qxy'
+}
+EOF
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with a node hostname succeeds"
+assert_contains "$BASE/rootfs/etc/hosts" "203.0.113.9 qxyfoods.com" \
+  "node hostname is pinned in the chroot hosts file"
 
 # 8. The chroot must live in a private mount namespace and never unmount
 #    host-visible mounts (the /dev/binderfs regression).
