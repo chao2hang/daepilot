@@ -16,13 +16,13 @@ android {
         applicationId = "io.github.daepilot"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.3.6"
+        versionCode = 10
+        versionName = "0.3.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
         buildConfigField("String", "DAE_VERSION", "\"2.1.1\"")
-        buildConfigField("String", "MODULE_VERSION", "\"0.1.4\"")
+        buildConfigField("String", "MODULE_VERSION", "\"0.1.5\"")
         buildConfigField("String", "LOG_UPLOAD_URL", "\"https://hdown.bor.nomsg.cn/api/logs\"")
     }
 

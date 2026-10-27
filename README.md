@@ -51,6 +51,7 @@ Magisk module
 - **私有 mount namespace**：用 `busybox unshare -m` 启动 dae，并读取 `/proc/self/mountinfo` 确认根挂载已不在 `shared:` peer group 中。`mount -o rprivate` 只做兜底：busybox 会把单个目录参数当成 fstab 查询，toybox 则接受未知 `-o` 参数但不生效，所以不能用退出码判断成功。这样 `--rbind /dev` 之后的卸载不会传播到宿主，避免宿主 `/dev/binderfs` 被拆掉。
 - **内存锁**：启动前把 `RLIMIT_MEMLOCK` 提到 unlimited。Android 默认上限 64 KiB，dae 加载 geoip/geosite 时 LPM map 更新会报 `newLpmMap: batch update: cannot allocate memory` 并直接退出。
 - **DNS 交接**：App 把当前网络的 `LinkProperties.dnsServers` 写入 `run/dns.servers`，`daepilotctl` 再写入 rootfs 的 `/etc/resolv.conf`，供 dae 内 Go resolver 解析节点域名；配置里不再写死 `bootstrap_resolver`。
+- **Resolver 清洗**：Android `dumpsys` 输出的 DNS 形如 `/10.0.2.3`，写入 `resolv.conf` 前会去掉 `/`、方括号和 zone id；否则整份文件非法，dae 的 Go resolver 会回落到 `[::1]:53`，网络检查/节点解析直接失败。
 - **节点地址固定**：启动/应用配置前用 Android 系统 resolver 解析代理组节点域名并写入 chroot 的 `/etc/hosts`，节点连接不再依赖可能被蜂窝网络丢弃的公共 DNS；热重载时保留已解析结果，并为新节点补做解析。
 - **进程判定**：`status` / watchdog 不再只看 `kill -0`：还要排除 zombie（读 `/proc/<pid>/stat` 状态位）并校验 cmdline 是本次 chroot 的 `dae run -c /config/config.dae`，避免残留 PID 被误判为运行中而阻止重启。
 - **watchdog**：`daepilotctl watch` 在 `enabled` 存在时循环检查 PID，异常退出自动重启。

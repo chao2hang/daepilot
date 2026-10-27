@@ -148,8 +148,20 @@ ensure_mounts() {
 # Appends a resolver unless it is unusable or already listed.
 add_nameserver() {
   ns="$1"
+  # Android's dumpsys prints resolvers as "/10.0.2.3"; brackets, zone ids and
+  # separators can also survive the shell split. A leading slash makes the
+  # whole resolv.conf invalid, so dae's Go resolver silently falls back to
+  # [::1]:53 and the network check/bootstrap fail.
+  ns="${ns#/}"
+  ns="${ns#[}"
+  ns="${ns%]}"
+  ns="${ns%%\%*}"
+  ns="$(printf '%s' "$ns" | tr -d ' \r\t,')"
   case "$ns" in
-    ""|"0.0.0.0"|"::"|"::1"|127.*|fe80:*|169.254.*) return 0 ;;
+    ""|*[!0-9A-Fa-f:.]*) return 0 ;;
+  esac
+  case "$ns" in
+    "0.0.0.0"|"::"|"::1"|127.*|fe80:*|169.254.*) return 0 ;;
   esac
   grep -qx "nameserver $ns" "$resolv_tmp" 2>/dev/null && return 0
   echo "nameserver $ns" >> "$resolv_tmp"

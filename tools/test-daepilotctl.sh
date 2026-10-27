@@ -373,6 +373,20 @@ assert_eq "$rc" "0" "apply with a node hostname succeeds"
 assert_contains "$BASE/rootfs/etc/hosts" "203.0.113.9 qxyfoods.com" \
   "node hostname is pinned in the chroot hosts file"
 
+# 10. Android's dumpsys formats resolvers as "/10.0.2.3"; a leading slash in
+#     resolv.conf makes dae's Go resolver fall back to [::1]:53.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+mkdir -p "$BASE/run"
+printf '/10.0.2.3\n' > "$BASE/run/dns.servers"
+printf 'global {\n  log_level: info\n}\n' > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with dumpsys-style resolver succeeds"
+assert_contains "$BASE/rootfs/etc/resolv.conf" "nameserver 10.0.2.3" \
+  "leading slash is stripped from the resolver"
+assert_not_contains "$BASE/rootfs/etc/resolv.conf" "nameserver /" \
+  "no invalid slash-prefixed resolver is written"
+
 # 8. The chroot must live in a private mount namespace and never unmount
 #    host-visible mounts (the /dev/binderfs regression).
 assert_contains "$CTL_SRC" "exec_in_private_ns" "ctl has the private-mount-namespace entry point"
