@@ -21,7 +21,6 @@ import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -46,6 +45,7 @@ import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
 import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.components.ConfirmDialog
+import io.github.daepilot.ui.components.DaeChip
 import io.github.daepilot.ui.components.DiagnosticsDialog
 import io.github.daepilot.ui.components.GroupLabel
 import io.github.daepilot.ui.components.KeyValueRow
@@ -214,12 +214,12 @@ fun SettingsScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     themeModes.forEach { (value, label) ->
-                        FilterChip(
+                        DaeChip(
                             selected = snapshot.settings.themeMode == value,
                             onClick = {
                                 viewModel.updateSettings { it.copy(themeMode = value) }
                             },
-                            label = { Text(label) },
+                            label = label,
                         )
                     }
                 }

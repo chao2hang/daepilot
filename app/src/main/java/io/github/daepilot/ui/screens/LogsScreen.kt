@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Article
@@ -25,16 +27,13 @@ import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.MoreVert
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -53,11 +52,15 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.LogLine
 import io.github.daepilot.ui.LogUploadState
 import io.github.daepilot.ui.components.ConfirmDialog
+import io.github.daepilot.ui.components.DaeChip
 import io.github.daepilot.ui.components.EmptyState
+import io.github.daepilot.ui.components.GlassSearchField
+import io.github.daepilot.ui.components.GlassSurface
 import io.github.daepilot.ui.components.ScreenEdge
 import io.github.daepilot.ui.components.ScreenHeader
 
@@ -104,7 +107,11 @@ fun LogsScreen(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .navigationBarsPadding(),
+    ) {
         ScreenHeader(
             title = "日志",
             subtitle = "${filtered.size} / ${logs.size} 行 · 2.5 秒刷新",
@@ -182,16 +189,13 @@ fun LogsScreen(
             )
         }
 
-        OutlinedTextField(
+        GlassSearchField(
             value = query,
             onValueChange = { query = it },
+            placeholder = "搜索日志",
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = ScreenEdge, vertical = 8.dp),
-            placeholder = { Text("搜索日志") },
-            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
-            singleLine = true,
-            shape = MaterialTheme.shapes.small,
         )
 
         Row(
@@ -203,10 +207,10 @@ fun LogsScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             levelOptions.forEach { (value, label) ->
-                FilterChip(
+                DaeChip(
                     selected = level == value,
                     onClick = { level = value },
-                    label = { Text(label) },
+                    label = label,
                 )
             }
         }
@@ -247,20 +251,23 @@ fun LogsScreen(
                 modifier = Modifier.weight(1f),
             )
         } else {
-            LazyColumn(
-                state = listState,
+            GlassSurface(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(
-                    start = ScreenEdge,
-                    end = ScreenEdge,
-                    top = 4.dp,
-                    bottom = 24.dp,
-                ),
+                    .fillMaxWidth()
+                    .padding(horizontal = ScreenEdge),
+                shape = RoundedCornerShape(22.dp),
+                contentPadding = PaddingValues(0.dp),
+                spacing = 0.dp,
             ) {
-                items(filtered) { line ->
-                    LogRow(line)
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    items(filtered) { line ->
+                        LogRow(line)
+                    }
                 }
             }
         }
@@ -354,7 +361,11 @@ private fun LogRow(line: LogLine) {
     ) {
         Text(
             text = line.level.take(1).uppercase(),
-            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+            ),
             color = color,
             modifier = Modifier.width(14.dp),
         )
@@ -363,7 +374,11 @@ private fun LogRow(line: LogLine) {
             modifier = Modifier
                 .weight(1f)
                 .padding(start = 6.dp),
-            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+            ),
             color = color,
             softWrap = true,
             overflow = TextOverflow.Visible,

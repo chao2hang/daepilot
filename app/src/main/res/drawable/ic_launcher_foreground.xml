@@ -4,19 +4,8 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Swallow-tail wing, kept inside the 66dp adaptive-icon safe zone. -->
     <path
         android:fillColor="#FFF5F2E9"
-        android:pathData="M34,30 H44 V78 H34 Z" />
-    <path
-        android:fillColor="#FFF5F2E9"
-        android:pathData="M30,30 H50 V34 H30 Z" />
-    <path
-        android:fillColor="#FFF5F2E9"
-        android:pathData="M30,74 H50 V78 H30 Z" />
-    <path
-        android:fillColor="#FFF5F2E9"
-        android:pathData="M44,30 C66,30 78,40 78,54 C78,68 66,78 44,78 L44,70 C61,70 67,63 67,54 C67,45 61,38 44,38 Z" />
-    <path
-        android:fillColor="#FFC8A96A"
-        android:pathData="M78,75 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0" />
+        android:pathData="M28,35 H52 L80,54 L52,73 H28 L58,54 Z" />
 </vector>

@@ -97,6 +97,9 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    // Real backdrop blur for the floating glass dock. 1.1.1 is built against
+    // Kotlin 2.0.21 / Compose 1.7.1, matching this project's toolchain.
+    implementation("dev.chrisbanes.haze:haze:1.1.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     implementation("androidx.datastore:datastore-preferences:1.1.1")

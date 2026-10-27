@@ -1,6 +1,5 @@
 package io.github.daepilot.ui.components
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -18,11 +17,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,7 +38,7 @@ import io.github.daepilot.core.model.TrafficInfo
 import io.github.daepilot.ui.Format
 
 val ScreenEdge = 20.dp
-val ScreenBottom = 28.dp
+val ScreenBottom = 132.dp
 
 @Composable
 fun ScreenHeader(
@@ -53,7 +52,7 @@ fun ScreenHeader(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 22.dp, bottom = 14.dp),
+                .padding(top = 20.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (leading != null) {
@@ -64,15 +63,14 @@ fun ScreenHeader(
                 if (subtitle != null) {
                     Text(
                         subtitle,
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 5.dp),
+                        modifier = Modifier.padding(top = 2.dp),
                     )
                 }
             }
             actions()
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     }
 }
 
@@ -80,7 +78,7 @@ fun ScreenHeader(
 fun GroupLabel(text: String, modifier: Modifier = Modifier) {
     Text(
         text,
-        modifier = modifier.padding(start = 2.dp, top = 24.dp, bottom = 8.dp),
+        modifier = modifier.padding(start = 4.dp, top = 20.dp, bottom = 6.dp),
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -94,56 +92,42 @@ fun SectionCard(
     action: @Composable (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Surface(
+    GlassSurface(
         modifier = modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        contentPadding = PaddingValues(18.dp),
+        spacing = 12.dp,
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (title != null || action != null) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        if (title != null) {
-                            Text(title, style = MaterialTheme.typography.titleMedium)
-                        }
-                        if (subtitle != null) {
-                            Text(
-                                subtitle,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 1.dp),
-                            )
-                        }
+        if (title != null || action != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    if (title != null) {
+                        Text(title, style = MaterialTheme.typography.titleMedium)
                     }
-                    action?.invoke()
+                    if (subtitle != null) {
+                        Text(
+                            subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 1.dp),
+                        )
+                    }
                 }
+                action?.invoke()
             }
-            content()
         }
+        content()
     }
 }
 
-/** A flat grouped list, used for settings and rows that should not float. */
 @Composable
 fun ListGroup(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Column(content = content)
-    }
+    GlassGroup(modifier = modifier.fillMaxWidth(), content = content)
 }
 
 @Composable
@@ -159,14 +143,14 @@ fun ListRow(
         modifier = modifier
             .fillMaxWidth()
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 16.dp, vertical = 15.dp),
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (leadingIcon != null) {
             Icon(
                 leadingIcon,
                 contentDescription = null,
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(19.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.width(14.dp))
@@ -193,7 +177,7 @@ fun ListRow(
 fun RowDivider() {
     HorizontalDivider(
         modifier = Modifier.padding(start = 16.dp),
-        color = MaterialTheme.colorScheme.outlineVariant,
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
     )
 }
 
@@ -240,7 +224,7 @@ fun LatencyBadge(millis: Int?, error: String? = null, tag: String? = null) {
 
 @Composable
 fun TrafficBar(traffic: TrafficInfo) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(
                 "已用 ${Format.bytes(traffic.usedBytes)}",
@@ -261,9 +245,9 @@ fun TrafficBar(traffic: TrafficInfo) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(2.dp)
+                .height(6.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceVariant),
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)),
         ) {
             Box(
                 modifier = Modifier
@@ -297,35 +281,44 @@ fun EmptyState(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 48.dp),
+            .padding(horizontal = 24.dp, vertical = 40.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            modifier = Modifier.size(24.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        GlassSurface(
+            shape = CircleShape,
+            contentPadding = PaddingValues(16.dp),
+            spacing = 0.dp,
+            elevation = 6.dp,
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                modifier = Modifier.size(24.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+        }
         Text(
             title,
             style = MaterialTheme.typography.headlineSmall,
             textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 14.dp),
+            modifier = Modifier.padding(top = 16.dp),
         )
         Text(
             message,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 6.dp),
+            modifier = Modifier.padding(top = 4.dp),
         )
         if (primaryLabel != null && onPrimary != null) {
-            TextButton(onClick = onPrimary, modifier = Modifier.padding(top = 4.dp)) {
-                Text(primaryLabel)
+            TextButton(onClick = onPrimary, modifier = Modifier.padding(top = 6.dp)) {
+                Text(primaryLabel, style = MaterialTheme.typography.labelLarge)
             }
         }
         if (secondaryLabel != null && onSecondary != null) {
-            TextButton(onClick = onSecondary) { Text(secondaryLabel) }
+            TextButton(onClick = onSecondary) {
+                Text(secondaryLabel, style = MaterialTheme.typography.labelLarge)
+            }
         }
     }
 }
@@ -380,6 +373,10 @@ fun ConfirmDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(30.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         title = { Text(title) },
         text = { Text(message) },
         confirmButton = {
