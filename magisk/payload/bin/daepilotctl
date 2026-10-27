@@ -434,11 +434,13 @@ dae_pids() {
 }
 
 watchdog_pid() {
+  local state
   pid=""
   if [ -s "$WATCH_PID" ]; then
     candidate="$(tr -dc '0-9' < "$WATCH_PID" 2>/dev/null)"
     if [ -n "$candidate" ] && kill -0 "$candidate" 2>/dev/null; then
-      pid="$candidate"
+      state="$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$candidate/stat" 2>/dev/null)"
+      [ "$state" != "Z" ] && pid="$candidate"
     fi
   fi
   if [ -z "$pid" ]; then
@@ -447,7 +449,10 @@ watchdog_pid() {
       [ -r "$dir/cmdline" ] || continue
       cmd="$(tr '\000' ' ' < "$dir/cmdline" 2>/dev/null)"
       case "$cmd" in
-        *"daepilotctl watch"*) pid="$candidate"; break ;;
+        *"daepilotctl watch"*)
+          state="$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$candidate/stat" 2>/dev/null)"
+          [ "$state" = "Z" ] && continue
+          pid="$candidate"; break ;;
       esac
     done
   fi
