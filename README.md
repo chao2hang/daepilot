@@ -48,9 +48,13 @@ Magisk module
 
 - **App 与 daemon 解耦**：`ControlService` 只轮询 `daepilotctl status` 并更新通知，杀掉 App 不影响 dae。
 - **chroot 隔离**：dae 只看到 rootfs 内的 `/proc`、`/dev`、必要的 sysfs 子树、cgroup2 与 bpffs；卸载时只处理 rootfs 下自己的挂载点。
+- **私有 mount namespace**：用 `busybox unshare -m` 启动 dae，并读取 `/proc/self/mountinfo` 确认根挂载已不在 `shared:` peer group 中。`mount -o rprivate` 只做兜底：busybox 会把单个目录参数当成 fstab 查询，toybox 则接受未知 `-o` 参数但不生效，所以不能用退出码判断成功。这样 `--rbind /dev` 之后的卸载不会传播到宿主，避免宿主 `/dev/binderfs` 被拆掉。
+- **内存锁**：启动前把 `RLIMIT_MEMLOCK` 提到 unlimited。Android 默认上限 64 KiB，dae 加载 geoip/geosite 时 LPM map 更新会报 `newLpmMap: batch update: cannot allocate memory` 并直接退出。
+- **DNS 交接**：App 把当前网络的 `LinkProperties.dnsServers` 写入 `run/dns.servers`，`daepilotctl` 再写入 rootfs 的 `/etc/resolv.conf`，供 dae 内 Go resolver 解析节点域名；配置里不再写死 `bootstrap_resolver`。
+- **进程判定**：`status` / watchdog 不再只看 `kill -0`：还要排除 zombie（读 `/proc/<pid>/stat` 状态位）并校验 cmdline 是本次 chroot 的 `dae run -c /config/config.dae`，避免残留 PID 被误判为运行中而阻止重启。
 - **watchdog**：`daepilotctl watch` 在 `enabled` 存在时循环检查 PID，异常退出自动重启。
 - **配置安全**：渲染 → 使用 `.dae` 后缀的临时文件执行 `dae validate` → 备份 → 替换 → 热重载；热重载失败自动回滚并重启。校验失败时保留 dae 原始诊断到本地日志。
-- **dae 出站路由**：配置 `so_mark_from_dae: 0x100`，启动时将 `fwmark 0x100/0x1ffff` 指向真实默认路由表（priority 9900），停止时删除该规则；路由选择跳过 `dummy0`、`lo` 和 blackhole/unreachable 等伪默认路由。
+- **dae 出站路由**：配置 `so_mark_from_dae: 0x100`，启动时同时为 IPv4 与 IPv6 添加 `fwmark 0x100/0x1ffff` 规则（priority 9900），停止时删除；路由选择跳过 `dummy0`、`lo` 和 blackhole/unreachable 等伪默认路由。IPv6 优先选默认路由落在 WAN 接口所在的那张表——Android 会同时保留其它链路（如 `rmnet_data2`）的活动 v6 表，选错会从错误的链路发出。
 - **节点自环规避**：自动为每个节点服务器生成 `dip/domain + dport -> must_direct` 规则，避免 tproxy 捕获 dae 自己的出站连接。
 - **名称改写**：dae 的 `filter: name(...)` 匹配链接里的显示名而不是 `node {}` 的键，因此渲染时会先把节点链接的 fragment / vmess `ps` 改写为唯一 ASCII 标识，再在分组中引用。
 
@@ -120,6 +124,9 @@ Magisk 管理器中的模块「动作」按钮可直接启停 dae。
 - hysteria2 / TUIC 基于 QUIC，TCP 延迟测试无法反映真实可用性。
 - Clash / sing-box 转换覆盖常用字段；SSR、WireGuard、Snell 等类型会跳过并在导入结果中给出警告。
 - 订阅若使用明文 HTTP，App 已允许 cleartext；仍建议优先使用 HTTPS。
+- `dial_mode` 默认 `ip`：由手机侧解析后把目标 IP 交给节点，避开节点侧二次解析。部分节点的上游 DNS 会把域名解析到绕路地址，连接会卡住数十秒（同一节点实测 `domain` 1.3 KB/s、`ip` 2.5 MB/s）。分流仍按嗅探到的域名匹配；若确认节点侧解析更优，可改回 `domain`。
+- hysteria2 / TUIC 走 QUIC，蜂窝链路丢包会同时拖慢所有 QUIC 客户端。实测 15% 丢包时独立 hysteria 客户端与 dae 一起掉到几十 KB/s，属于链路问题而非 dae。
+- `DAE_ALLOW_TCP_SOCKMAP=1` 的 TCP relay eBPF offload 需要支持 inner accounting 的 kprobe ABI；部分内核会以 `attach tcp_offload_sent_account` 失败并回落到用户态转发。实测直连吞吐约 980 KB/s，未成为瓶颈。
 
 ## 许可
 

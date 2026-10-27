@@ -328,7 +328,7 @@ object DaeConfigRenderer {
             ?: "info"
 
     private fun safeDialMode(raw: String): String =
-        raw.takeIf { it in setOf("ip", "domain", "domain+", "domain++") } ?: "domain"
+        raw.takeIf { it in setOf("ip", "domain", "domain+", "domain++") } ?: "ip"
 
     private fun safeInterface(raw: String): String {
         val value = raw.trim()

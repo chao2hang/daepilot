@@ -1,0 +1,7 @@
+# Device-side module scripts run under Android's sh. CRLF breaks every line
+# ("set -e\r: not found"), so pin them to LF regardless of core.autocrlf.
+*.sh text eol=lf
+*.prop text eol=lf
+magisk/payload/bin/daepilotctl text eol=lf
+magisk/payload/bin/VERSION text eol=lf
+magisk/META-INF/** text eol=lf

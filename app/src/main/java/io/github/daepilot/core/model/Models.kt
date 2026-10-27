@@ -148,7 +148,11 @@ data class RenderSpec(
     val wanInterface: String = "auto",
     val lanInterface: String? = null,
     val autoConfigKernelParameter: Boolean = true,
-    val dialMode: String = "domain",
+    // Dial by IP. With `domain` the node resolves the sniffed hostname itself;
+    // one bad server-side answer stalls the whole connection for tens of
+    // seconds (measured 1.3 KB/s vs 2.5 MB/s on the same node). Routing still
+    // matches on the sniffed domain, so geosite rules keep working.
+    val dialMode: String = "ip",
     val bypassPackages: List<String> = emptyList(),
     val nodeBypassRules: Boolean = true,
     val includeNodeBypassRules: Boolean = true,

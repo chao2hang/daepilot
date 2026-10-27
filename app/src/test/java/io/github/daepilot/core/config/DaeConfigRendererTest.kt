@@ -176,6 +176,19 @@ class DaeConfigRendererTest {
     }
 
     @Test
+    fun dialsByIpUnlessAnExplicitModeIsGiven() {
+        assertTrue(render(RenderSpec(nodes = listOf(hk))).contains("  dial_mode: ip\n"))
+        assertTrue(
+            render(RenderSpec(nodes = listOf(hk), dialMode = "domain"))
+                .contains("  dial_mode: domain\n"),
+        )
+        assertTrue(
+            render(RenderSpec(nodes = listOf(hk), dialMode = "bogus"))
+                .contains("  dial_mode: ip\n"),
+        )
+    }
+
+    @Test
     fun emptyNodeListRendersWithoutGroups() {
         val config = render(RenderSpec(nodes = emptyList()))
         assertTrue(config.contains("node {\n}"))
