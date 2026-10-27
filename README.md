@@ -54,9 +54,9 @@ Magisk module
 - **Resolver 清洗**：Android `dumpsys` 输出的 DNS 形如 `/10.0.2.3`，写入 `resolv.conf` 前会去掉 `/`、方括号和 zone id；否则整份文件非法，dae 的 Go resolver 会回落到 `[::1]:53`，网络检查/节点解析直接失败。
 - **Wi-Fi / 蜂窝双 WAN**：`wan_interface: auto` 由 `daepilotctl` 从 Android policy routing 解析当前默认接口（`wlan0`、`rmnet_dataN` 等），watchdog 检测到接口变化后自动重启 dae，避免 Wi-Fi/移动数据切换后仍绑定旧接口。模拟器上已验证 Wi-Fi → 移动数据切换后自动 `Bind to WAN: eth0` 并继续代理。
 - **rmnet 兼容**：模块自带的 dae payload 使用 L3 WAN egress hook，适配 Android rmnet 的 raw-IP；官方 L2 构建在 rmnet 上抓不到本地流量，因此不要替换移动网络场景下的 payload。
-- **节点地址固定**：启动/应用配置前用 Android 系统 resolver 解析代理组节点域名，写入 chroot 的 `/etc/hosts`，并把配置里的节点 URL 直接替换为解析出的 IPv4（同时把该域名的 `must_direct` 规则改为 IP），因为该 dae 构建的 bootstrap resolver 不读取 `/etc/hosts`；热重载时保留已解析结果，并为新节点补做解析。
+- **节点地址固定**：启动/应用配置前用 Android 系统 resolver 解析代理组节点域名，写入 chroot 的 `/etc/hosts`，并把配置里的节点 URL 直接替换为解析出的 IPv4（同时把该域名的 `must_direct` 规则改为 IP），因为该 dae 构建的 bootstrap resolver 不读取 `/etc/hosts`；重写后恢复 `0600`，否则 dae 会拒绝权限过宽的配置。热重载时保留已解析结果，并为新节点补做解析。
 - **进程判定**：`status` / watchdog 不再只看 `kill -0`：还要排除 zombie（读 `/proc/<pid>/stat` 状态位）并校验 cmdline 是本次 chroot 的 `dae run -c /config/config.dae`，避免残留 PID 被误判为运行中而阻止重启。
-- **watchdog**：`daepilotctl watch` 在 `enabled` 存在时循环检查 PID，异常退出自动重启。进程发现使用一次 `grep -l` 批量扫描 `/proc/*/cmdline`，替代逐进程 fork，蜂窝/Wi-Fi 切换后的 daemon 重启从约 60 秒降到约 15 秒。
+- **watchdog**：`daepilotctl watch` 在 `enabled` 存在时循环检查 PID，异常退出自动重启。进程发现使用单次 `ps -A -o PID,ARGS` 扫描，替代逐进程 fork（toybox grep 不支持 `-a`，会跳过 NUL 分隔的 cmdline），蜂窝/Wi-Fi 切换后的 daemon 重启从约 60 秒降到 7–15 秒。
 - **配置安全**：渲染 → 使用 `.dae` 后缀的临时文件执行 `dae validate` → 备份 → 替换 → 热重载；热重载失败自动回滚并重启。校验失败时保留 dae 原始诊断到本地日志。
 - **dae 出站路由**：配置 `so_mark_from_dae: 0x100`，启动时同时为 IPv4 与 IPv6 添加 `fwmark 0x100/0x1ffff` 规则（priority 9900），停止时删除；路由选择跳过 `dummy0`、`lo` 和 blackhole/unreachable 等伪默认路由。IPv6 优先选默认路由落在 WAN 接口所在的那张表——Android 会同时保留其它链路（如 `rmnet_data2`）的活动 v6 表，选错会从错误的链路发出。
 - **节点自环规避**：自动为每个节点服务器生成 `dip/domain + dport -> must_direct` 规则，避免 tproxy 捕获 dae 自己的出站连接。

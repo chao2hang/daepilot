@@ -400,6 +400,8 @@ pin_node_urls() {
   done < "$NODE_HOSTS_CACHE"
   if [ -s "$tmp" ]; then
     mv "$tmp" "$file" 2>/dev/null
+    # The rewrite replaces the file, so restore the private mode dae requires.
+    chmod 600 "$file" 2>/dev/null
   else
     rm -f "$tmp" 2>/dev/null
   fi
@@ -657,6 +659,17 @@ is_our_dae() {
 # Every live dae, including instances whose pid file was lost. The app, the
 # script and the watchdog can run in different mount namespaces, so the pid
 # files are not authoritative.
+# List PIDs whose full command line contains the given literal string.
+# toybox grep has no -a and skips NUL-separated /proc/*/cmdline files, so a
+# single `ps` pass is the portable way to find processes on Android.
+process_pids_matching() {
+  ps -A -o PID,ARGS 2>/dev/null | grep -F "$1" | grep -v grep \
+    | while read -r pid rest; do
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        echo "$pid"
+      done
+}
+
 dae_pids() {
   found=""
   if have pidof; then
@@ -665,12 +678,7 @@ dae_pids() {
     done
   fi
   if [ -z "$found" ]; then
-    # One grep over all cmdline files is far cheaper than forking tr/sed for
-    # every process: the per-PID loop added ~14s to every daemon restart on
-    # large ROMs. The bracketed dot keeps grep from matching itself.
-    for file in $(grep -l -a 'run -c /config/config[.]dae' /proc/[0-9]*/cmdline 2>/dev/null); do
-      pid="${file#/proc/}"
-      pid="${pid%/cmdline}"
+    for pid in $(process_pids_matching 'run -c /config/config.dae'); do
       if is_our_dae "$pid"; then found="$found $pid"; fi
     done
   fi
@@ -688,17 +696,8 @@ watchdog_pid() {
     fi
   fi
   if [ -z "$pid" ]; then
-    # Same batched scan as dae_pids; the bracket keeps grep from matching the
-    # pattern in its own command line.
-    for file in $(grep -l -a 'daepilotctl [w]atch' /proc/[0-9]*/cmdline 2>/dev/null); do
-      candidate="${file#/proc/}"
-      candidate="${candidate%/cmdline}"
+    for candidate in $(process_pids_matching 'daepilotctl watch'); do
       [ "$candidate" = "$$" ] && continue
-      cmd="$(tr '\000' ' ' < "$file" 2>/dev/null)"
-      case "$cmd" in
-        *"daepilotctl watch"*) ;;
-        *) continue ;;
-      esac
       state="$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$candidate/stat" 2>/dev/null)"
       [ "$state" = "Z" ] && continue
       pid="$candidate"; break

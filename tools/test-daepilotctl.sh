@@ -538,6 +538,8 @@ printf '%s
 assert_contains "$WORK/node-switch.out" "节点服务器已变化" "node switch triggers a restart"
 assert_contains "$BASE/rootfs/config/config.dae" "@203.0.113.9:443" \
   "new node URL is pinned after the restart"
+assert_contains "$CTL_SRC" 'chmod 600 "$file"' \
+  "ctl restores the private config mode after the node URL rewrite"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null; DAEMON_PID=""
 
 # 16. The built-in domestic resolver is dropped by some carriers. It must be
@@ -610,6 +612,8 @@ assert_contains "$CTL_SRC" "exec_in_private_ns" "ctl has the private-mount-names
 assert_contains "$CTL_SRC" "unshare -m" "ctl launches the chroot under unshare -m"
 assert_not_contains "$CTL_SRC" "cleanup_mounts" "ctl no longer unmounts host-visible chroot mounts"
 assert_not_contains "$CTL_SRC" "umount -l" "ctl does not lazy-unmount anything"
+assert_not_contains "$CTL_SRC" "grep -l -a" "ctl avoids toybox-incompatible grep flags"
+assert_contains "$CTL_SRC" "ps -A -o PID,ARGS" "ctl discovers processes through ps"
 
 # ==========================================================================
 if [ "$FAILED" -eq 0 ]; then
