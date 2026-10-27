@@ -48,4 +48,13 @@ class ConfigRedactorTest {
         assertFalse(out.contains("hunter2"))
         assertFalse(out.contains("abc"))
     }
+
+    @Test
+    fun masksSsrPayloadBecauseTheWholeBlobIsTheCredential() {
+        val payload = "hk.example.com:443:auth_aes128_sha1:aes-256-cfnm:sup3rsecret:plain"
+        val encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())
+        val out = ConfigRedactor.redact("  SSR_node: 'ssr://$encoded#SSR'")
+        assertFalse(out.contains(encoded))
+        assertTrue(out.contains("ssr://<redacted>"))
+    }
 }

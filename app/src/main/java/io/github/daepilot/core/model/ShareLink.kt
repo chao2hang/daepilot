@@ -71,6 +71,7 @@ object ShareLink {
         return when (scheme(trimmed)) {
             "vmess" -> vmessEndpoint(trimmed)
             "ss" -> ssEndpoint(trimmed)
+            "ssr" -> ssrEndpoint(trimmed)
             null -> null
             else -> authorityEndpoint(trimmed)
         }
@@ -96,6 +97,28 @@ object ShareLink {
         val decoded = decodeBase64Lenient(beforeQuery) ?: return null
         val hostPort = decoded.substringAfterLast('@')
         return splitHostPort(hostPort)
+    }
+
+    /**
+     * `ssr://base64url(server:port:protocol:cipher:password:obfs)` keeps the host
+     * inside the payload, so the authority parser would hand the whole blob back
+     * as the hostname.
+     */
+    private fun ssrEndpoint(link: String): ShareEndpoint? {
+        val payload = link.substringAfter("://", "").substringBefore('#').substringBefore('/')
+        if (payload.isEmpty()) return null
+        val decoded = decodeBase64Lenient(payload) ?: return null
+        val firstColon = decoded.indexOf(':')
+        if (firstColon <= 0) return null
+        val bracketed = decoded.startsWith('[')
+        val host = if (bracketed) {
+            decoded.substringBefore(']').removePrefix("[")
+        } else {
+            decoded.substringBefore(':')
+        }
+        if (host.isEmpty()) return null
+        val tail = decoded.substring(if (bracketed) decoded.indexOf(']') + 1 else firstColon)
+        return ShareEndpoint(host, tail.removePrefix(":").takeWhile { it.isDigit() }.toIntOrNull())
     }
 
     private fun vmessEndpoint(link: String): ShareEndpoint? {

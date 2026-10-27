@@ -124,6 +124,22 @@ class ShareLinkTest {
         assertEquals("vless://uuid@[2001:db8::1]:443?encryption=none#%E8%8A%82%E7%82%B9%20A", link)
     }
 
+    @Test
+    fun parsesSsrEndpointFromBase64Payload() {
+        // ssr:// carries server:port:protocol:cipher:password:obfs, url-safe
+        // base64'd with no separator the parser could otherwise key on.
+        val payload = "hk.example.com:443:auth_aes128_sha1:aes-256-cfnm:sup3rsecret:plain"
+        val encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())
+        val endpoint = ShareLink.endpoint("ssr://$encoded#SSR").orThrow()
+        assertEquals("hk.example.com", endpoint.host)
+        assertEquals(443, endpoint.port)
+    }
+
+    @Test
+    fun rejectsSsrLinkWhosePayloadDoesNotDecode() {
+        assertNull(ShareLink.endpoint("ssr://not-base64-at-all##"))
+    }
+
     private fun ShareEndpoint?.orThrow(): ShareEndpoint =
         requireNotNull(this) { "endpoint should parse" }
 }

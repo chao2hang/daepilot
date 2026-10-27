@@ -12,6 +12,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Base64
 
 class DaeConfigRendererTest {
     private fun node(id: String, name: String, link: String) =
@@ -111,6 +112,16 @@ class DaeConfigRendererTest {
     fun bypassRulesAreDeduplicated() {
         val rules = DaeConfigRenderer.buildNodeBypassRules(listOf(hk, hk))
         assertEquals(listOf("dip(1.2.3.4) && dport(443)"), rules)
+    }
+
+    @Test
+    fun ssrBypassRuleUsesTheRealServerNotTheBase64Payload() {
+        val payload = "hk2.example.com:8388:auth_aes128_sha1:aes-256-cfnm:sup3rsecret:plain"
+        val encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())
+        val rules = DaeConfigRenderer.buildNodeBypassRules(
+            listOf(node("n3", "SSR", "ssr://$encoded#SSR")),
+        )
+        assertEquals(listOf("domain(hk2.example.com) && dport(8388)"), rules)
     }
 
     @Test

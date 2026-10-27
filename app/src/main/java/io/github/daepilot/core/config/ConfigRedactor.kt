@@ -37,6 +37,9 @@ object ConfigRedactor {
     fun redactLink(link: String): String {
         val scheme = link.substringBefore("://", "").lowercase()
         if (scheme == "vmess") return redactVmess(link)
+        // The whole ssr payload is base64 of server:port:proto:cipher:password,
+        // so keeping any of it would ship the credential.
+        if (scheme == "ssr") return "ssr://<redacted>"
         val inline = redactInline(link)
         val masked = inline.replace(userInfo) { "${it.groupValues[1]}<redacted>@${it.groupValues[3]}" }
         if (scheme == "ss" && !inline.contains("@")) {
