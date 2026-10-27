@@ -1,4 +1,4 @@
-# DaePilot（翼航）
+# DaePilot
 
 DaePilot 是 [dae](https://github.com/daeuniverse/dae) eBPF 透明代理的 Android 原生图形管理器。它由一个 APK 和一个配套 Magisk 模块组成：App 负责订阅、节点、分流规则与状态展示，模块负责在 `/data/adb/daepilot` 下以 chroot + watchdog 的方式运行 dae，因此 App 被杀死或从最近任务划掉都不会中断代理。
 

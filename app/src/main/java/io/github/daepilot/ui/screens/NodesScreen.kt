@@ -1,6 +1,5 @@
 package io.github.daepilot.ui.screens
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -33,7 +32,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -149,26 +147,20 @@ fun NodesScreen(
 
         if (snapshot.nodes.any { it.protocol.isUdpOnly }) {
             Text(
-                "HY2 / TUIC 为 QUIC，延迟通过 ICMP 测量",
+                "QUIC 节点使用 ICMP 测延迟",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = ScreenEdge, end = ScreenEdge, bottom = 4.dp),
             )
         }
 
-        Surface(
+        LazyColumn(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(start = ScreenEdge, end = ScreenEdge, bottom = 16.dp),
-            shape = MaterialTheme.shapes.large,
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                .padding(horizontal = ScreenEdge),
+            contentPadding = PaddingValues(bottom = 16.dp),
         ) {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 6.dp),
-            ) {
                 item {
                     AutoSelectRow(
                         selected = snapshot.selectedNodeId == null,
@@ -183,7 +175,7 @@ fun NodesScreen(
                             icon = Icons.Outlined.Dns,
                             title = if (snapshot.nodes.isEmpty()) "节点库为空" else "没有匹配的节点",
                             message = if (snapshot.nodes.isEmpty()) {
-                                "先在订阅页导入订阅或粘贴节点链接。"
+                                "从订阅或分享链接导入节点。"
                             } else {
                                 "换个关键词或筛选条件。"
                             },
@@ -204,7 +196,6 @@ fun NodesScreen(
                     )
                 }
             }
-        }
     }
 
     deleteTarget?.let { node ->
@@ -232,7 +223,7 @@ private fun AutoSelectRow(selected: Boolean, onClick: () -> Unit) {
         Column(modifier = Modifier.weight(1f)) {
             Text("自动选择", style = MaterialTheme.typography.bodyLarge)
             Text(
-                "按最低移动平均延迟切换节点",
+                "按最低延迟自动切换",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

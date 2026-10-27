@@ -23,7 +23,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -87,7 +86,7 @@ fun SubscriptionsScreen(
                         Icon(Icons.Outlined.ContentPaste, contentDescription = "粘贴节点链接")
                     }
                     Spacer(Modifier.width(2.dp))
-                    FilledTonalIconButton(onClick = { showAdd = true }) {
+                    IconButton(onClick = { showAdd = true }) {
                         Icon(Icons.Outlined.Add, contentDescription = "添加订阅")
                     }
                 },
@@ -99,7 +98,7 @@ fun SubscriptionsScreen(
                 EmptyState(
                     icon = Icons.Outlined.Subscriptions,
                     title = "还没有订阅",
-                    message = "添加订阅链接，或直接粘贴节点分享链接。\n支持 Clash YAML、sing-box JSON 与 base64 列表。",
+                    message = "从订阅或分享链接导入节点。",
                     primaryLabel = "添加订阅",
                     onPrimary = { showAdd = true },
                     secondaryLabel = "粘贴节点链接",
@@ -123,25 +122,6 @@ fun SubscriptionsScreen(
             )
         }
 
-        item {
-            SectionCard(
-                title = "支持的格式",
-                subtitle = "解析后统一渲染为 dae 节点",
-            ) {
-                Text(
-                    "分享链接与 base64 列表（ss、vmess、vless、trojan、hysteria2、tuic 等）\n" +
-                        "Clash / Clash.Meta YAML 的 proxies\n" +
-                        "sing-box JSON 的 outbounds",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    "SSR、WireGuard、Snell 暂不支持，导入时会单独提示。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
     }
 
     if (showAdd) {
@@ -167,7 +147,7 @@ fun SubscriptionsScreen(
     deleteTarget?.let { target ->
         ConfirmDialog(
             title = "删除订阅",
-            message = "将删除「${target.name}」及其 ${target.nodeCount} 个节点。已应用的配置不会自动回滚。",
+            message = "删除「${target.name}」及其 ${target.nodeCount} 个节点？",
             confirmLabel = "删除",
             destructive = true,
             onConfirm = { viewModel.deleteSubscription(target.id) },
@@ -204,9 +184,8 @@ private fun SubscriptionCard(
                 )
                 Text(
                     buildString {
-                        append("${subscription.nodeCount} 个节点 · 更新于 ")
+                        append("${subscription.nodeCount} 个节点 · ")
                         append(Format.relativeTime(subscription.lastUpdatedAt))
-                        append(if (subscription.autoUpdate) " · 自动更新" else " · 手动更新")
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

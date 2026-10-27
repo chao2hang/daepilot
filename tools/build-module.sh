@@ -25,8 +25,24 @@ mkdir -p "$DIST" "$ASSETS"
 rm -f "$DIST/$NAME" "$ASSETS/$NAME"
 
 # Build from inside magisk/ so the archive root matches a Magisk module.
-(cd "$SRC" && zip -r -9 -X "$DIST/$NAME" . \
-  -x '*.DS_Store' -x '__MACOSX/*' -x '*.map' >/dev/null)
+if command -v zip >/dev/null 2>&1; then
+  (cd "$SRC" && zip -r -9 -X "$DIST/$NAME" . \
+    -x '*.DS_Store' -x '__MACOSX/*' -x '*.map' >/dev/null)
+else
+  python - "$SRC" "$DIST/$NAME" <<'PY'
+import os, sys, zipfile
+
+src, dst = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    for root, dirs, files in os.walk(src):
+        dirs.sort()
+        for name in sorted(files):
+            if name == ".DS_Store":
+                continue
+            path = os.path.join(root, name)
+            archive.write(path, os.path.relpath(path, src).replace(os.sep, "/"))
+PY
+fi
 
 cp "$DIST/$NAME" "$ASSETS/$NAME"
 echo "built $DIST/$NAME ($(du -h "$DIST/$NAME" | cut -f1))"

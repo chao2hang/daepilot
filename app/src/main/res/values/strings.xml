@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">DaePilot 翼航</string>
+    <string name="app_name">DaePilot</string>
     <string name="notification_channel_control">代理控制</string>
     <string name="notification_channel_logs">运行日志</string>
-    <string name="notification_control_title">DaePilot 正在运行</string>
-    <string name="notification_control_text">dae 数据面由模块托管，点击查看状态</string>
+    <string name="notification_control_title">DaePilot</string>
+    <string name="notification_control_text">由模块托管 · 点击查看状态</string>
 </resources>

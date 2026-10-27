@@ -59,16 +59,16 @@ object NotificationHelper {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
-        val title = if (status.running) "DaePilot · 代理运行中" else "DaePilot · 代理已停止"
+        val title = "DaePilot"
         val detail = when {
             status.running && status.pid != null -> {
                 val uptime = status.startedAt.takeIf { it > 0 }
                     ?.let { (System.currentTimeMillis() - it) / 1000 } ?: 0
-                "PID ${status.pid} · 运行 ${formatDuration(uptime)}" +
+                "运行 ${formatDuration(uptime)} · PID ${status.pid}" +
                     (status.version?.let { " · dae $it" } ?: "")
             }
             !status.lastError.isNullOrBlank() -> status.lastError
-            else -> "dae 数据面由 Magisk 模块托管，App 退出后仍会运行"
+            else -> "代理已停止"
         }
 
         return NotificationCompat.Builder(context, CHANNEL_CONTROL)

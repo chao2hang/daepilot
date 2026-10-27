@@ -98,7 +98,6 @@ fun RoutingScreen(
         item {
             ScreenHeader(
                 title = "分流",
-                subtitle = "修改后自动校验并热更新",
                 actions = {
                     if (busy) {
                         CircularProgressIndicator(
@@ -112,7 +111,7 @@ fun RoutingScreen(
         }
 
         item {
-            SectionCard(title = "分流模板", subtitle = "自定义规则优先于模板") {
+            SectionCard(title = "分流模板") {
                 RoutingTemplate.entries.forEachIndexed { index, template ->
                     if (index > 0) RowDivider()
                     TemplateRow(
@@ -127,7 +126,6 @@ fun RoutingScreen(
         item {
             SectionCard(
                 title = "自定义规则",
-                subtitle = "按顺序匹配，命中即停止",
                 action = {
                     IconButton(onClick = {
                         ruleEditor = null
@@ -139,7 +137,7 @@ fun RoutingScreen(
             ) {
                 if (snapshot.rules.isEmpty()) {
                     Text(
-                        "暂无自定义规则。例如 domain(geosite:openai) → proxy。",
+                        "暂无规则",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -162,7 +160,6 @@ fun RoutingScreen(
         item {
             SectionCard(
                 title = "自定义分组",
-                subtitle = "名称仅支持字母、数字、下划线",
                 action = {
                     IconButton(onClick = { showGroupEditor = true }) {
                         Icon(Icons.Outlined.Add, contentDescription = "新建分组")
@@ -170,17 +167,10 @@ fun RoutingScreen(
                 },
             ) {
                 Text(
-                    "内置出口：proxy、direct、block、must_direct",
-                    style = MaterialTheme.typography.bodySmall,
+                    "BUILT-IN · PROXY / DIRECT / BLOCK",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (customGroups.isEmpty()) {
-                    Text(
-                        "暂无自定义分组。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
                 customGroups.forEachIndexed { index, group ->
                     if (index > 0) RowDivider()
                     GroupRow(
@@ -193,7 +183,7 @@ fun RoutingScreen(
         }
 
         item {
-            SectionCard(title = "DNS", subtitle = "dae 内置 DNS 分流") {
+            SectionCard(title = "DNS") {
                 OutlinedTextField(
                     value = domesticDns,
                     onValueChange = { domesticDns = it },
@@ -215,11 +205,7 @@ fun RoutingScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("大陆域名使用国内 DNS", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            "关闭后所有查询走国外上游",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+
                     }
                     Switch(checked = useDomestic, onCheckedChange = { useDomestic = it })
                 }
@@ -242,7 +228,7 @@ fun RoutingScreen(
         }
 
         item {
-            SectionCard(title = "配置", subtitle = "热重载失败会自动回滚到上一版") {
+            SectionCard(title = "配置") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = viewModel::applyConfig,

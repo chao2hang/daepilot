@@ -118,10 +118,10 @@ data class RoutingRule(
 )
 
 enum class RoutingTemplate(val label: String, val description: String) {
-    BYPASS_MAINLAND("绕过大陆", "大陆域名/IP 直连，其余走代理"),
-    GLOBAL("全局代理", "除私有地址与节点服务器外全部走代理"),
-    WHITELIST("白名单", "只有自定义规则命中的流量走代理，其余直连"),
-    DIRECT("仅直连", "不代理任何流量（调试用）"),
+    BYPASS_MAINLAND("绕过大陆", "大陆直连，其余代理"),
+    GLOBAL("全局代理", "全部走代理"),
+    WHITELIST("白名单", "仅规则命中走代理"),
+    DIRECT("仅直连", "全部直连"),
 }
 
 @Serializable

@@ -93,7 +93,7 @@ fun SettingsScreen(
         item {
             ScreenHeader(
                 title = "设置",
-                subtitle = "DaePilot ${BuildConfig.VERSION_NAME} · 模块 ${BuildConfig.MODULE_VERSION}",
+                subtitle = "V${BuildConfig.VERSION_NAME.substringBefore("-debug")} · MODULE ${BuildConfig.MODULE_VERSION}",
             )
         }
 
@@ -124,21 +124,18 @@ fun SettingsScreen(
             ListGroup {
                 SwitchRow(
                     title = "开机自启",
-                    description = "写入模块 boot_enabled，由 service.sh 拉起 dae",
                     checked = snapshot.settings.bootStart,
                     onCheckedChange = viewModel::setBootStart,
                 )
                 RowDivider()
                 SwitchRow(
                     title = "后台常驻通知",
-                    description = "低优先级前台服务，仅用于显示状态",
                     checked = snapshot.settings.keepServiceRunning,
                     onCheckedChange = viewModel::setKeepService,
                 )
                 RowDivider()
                 ListRow(
                     title = "TProxy 端口",
-                    description = "透明代理监听端口",
                     onClick = { showPortDialog = true },
                     trailing = {
                         Text(
@@ -156,7 +153,6 @@ fun SettingsScreen(
                 RowDivider()
                 ListRow(
                     title = "日志等级",
-                    description = "dae 运行日志的详细程度",
                     onClick = { showLevelDialog = true },
                     trailing = {
                         Text(
@@ -179,7 +175,6 @@ fun SettingsScreen(
             ListGroup {
                 SwitchRow(
                     title = "自动更新订阅",
-                    description = "每 6 小时检查一次；更新后自动热重载",
                     checked = snapshot.settings.subscriptionAutoUpdate,
                     onCheckedChange = viewModel::setGlobalAutoUpdate,
                 )
@@ -192,9 +187,9 @@ fun SettingsScreen(
                 ListRow(
                     title = "分应用绕过",
                     description = if (snapshot.settings.bypassPackages.isEmpty()) {
-                        "未设置，所有应用流量都进入代理"
+                        "未设置"
                     } else {
-                        "${snapshot.settings.bypassPackages.size} 个包名直接连接"
+                        "${snapshot.settings.bypassPackages.size} 个包名"
                     },
                     onClick = { showBypassDialog = true },
                     trailing = {
@@ -269,7 +264,7 @@ fun SettingsScreen(
                         upload.uploading -> "正在上传…"
                         upload.lastId != null -> "已上传 · 编号 ${upload.lastId}"
                         upload.error != null -> upload.error
-                        else -> "生成诊断信息并发送到项目服务器"
+                        else -> "生成诊断信息"
                     },
                     leadingIcon = Icons.Outlined.CloudUpload,
                     onClick = if (upload.uploading) null else {
@@ -338,16 +333,15 @@ fun SettingsScreen(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    KeyValueRow("DaePilot", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                    KeyValueRow("DaePilot", "${BuildConfig.VERSION_NAME.substringBefore("-debug")} (${BuildConfig.VERSION_CODE})")
                     KeyValueRow("dae", status.version ?: BuildConfig.DAE_VERSION)
                     KeyValueRow("模块", BuildConfig.MODULE_VERSION)
                     KeyValueRow("数据面路径", "/data/adb/daepilot")
                 }
                 RowDivider()
                 Text(
-                    "数据面使用 dae（AGPL-3.0）。应用不内置任何订阅或节点，" +
-                        "订阅与节点只保存在本机，不会自动上传。",
-                    style = MaterialTheme.typography.bodySmall,
+                    "DAE · AGPL-3.0 · LOCAL ONLY",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(16.dp),
                 )
@@ -412,7 +406,7 @@ fun SettingsScreen(
 @Composable
 private fun SwitchRow(
     title: String,
-    description: String,
+    description: String? = null,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
 ) {
@@ -424,11 +418,13 @@ private fun SwitchRow(
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (description != null) {
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         Spacer(Modifier.width(12.dp))
         Switch(checked = checked, onCheckedChange = onCheckedChange)

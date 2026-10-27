@@ -1,7 +1,11 @@
 package io.github.daepilot.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -10,19 +14,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ChevronRight
-import androidx.compose.material.icons.outlined.Dns
-import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.StopCircle
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.outlined.PowerSettingsNew
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,30 +33,26 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.daepilot.BuildConfig
 import io.github.daepilot.core.model.AppSnapshot
 import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
+import io.github.daepilot.core.model.Node
 import io.github.daepilot.core.model.TrafficInfo
 import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.Format
 import io.github.daepilot.ui.components.DiagnosticsDialog
-import io.github.daepilot.ui.components.KeyValueRow
 import io.github.daepilot.ui.components.LatencyBadge
-import io.github.daepilot.ui.components.ListGroup
-import io.github.daepilot.ui.components.ListRow
-import io.github.daepilot.ui.components.ModuleSetupCard
-import io.github.daepilot.ui.components.RootSetupCard
-import io.github.daepilot.ui.components.RowDivider
 import io.github.daepilot.ui.components.ScreenBottom
 import io.github.daepilot.ui.components.ScreenEdge
-import io.github.daepilot.ui.components.ScreenHeader
-import io.github.daepilot.ui.components.SectionCard
-import io.github.daepilot.ui.components.StatusBadge
-import io.github.daepilot.ui.components.TrafficBar
 
 @Composable
 fun HomeScreen(
@@ -92,161 +89,61 @@ fun HomeScreen(
         contentPadding = PaddingValues(
             start = ScreenEdge,
             end = ScreenEdge,
-            top = 4.dp,
+            top = 0.dp,
             bottom = ScreenBottom,
         ),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            ScreenHeader(
-                title = "DaePilot",
-                subtitle = "dae ${status.version ?: BuildConfig.DAE_VERSION} · ${modeLabel(status.mode)}",
-                actions = {
-                    if (busy) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                        )
-                    }
-                },
+            BrandRow(
+                busy = busy,
+                daeVersion = status.version ?: BuildConfig.DAE_VERSION,
             )
         }
-
         item {
-            StatusPanel(
+            Hero(
                 status = status,
+                selectedNode = selectedNode,
                 busy = busy,
-                bootStart = snapshot.settings.bootStart,
+                setupLabel = when (status.mode) {
+                    "no-root" -> "授权"
+                    "module-missing" -> "安装"
+                    else -> null
+                },
+                setupLoading = (status.mode == "no-root" && rootState.requesting) ||
+                    (status.mode == "module-missing" && rootState.installingModule),
+                onSetup = when (status.mode) {
+                    "no-root" -> ({ viewModel.requestRoot() })
+                    "module-missing" -> ({ viewModel.installModule() })
+                    else -> null
+                },
                 onToggle = { viewModel.toggleProxy(!status.running) },
             )
         }
-
-        if (status.mode == "no-root") {
-            item {
-                RootSetupCard(
-                    requesting = rootState.requesting,
-                    message = rootState.message,
-                    onRequest = viewModel::requestRoot,
-                )
-            }
-        }
-        if (status.mode == "module-missing") {
-            item {
-                ModuleSetupCard(
-                    installing = rootState.installingModule,
-                    onInstall = viewModel::installModule,
-                )
-            }
-        }
-
         item {
-            ListGroup {
-                ListRow(
-                    title = selectedNode?.name ?: "自动选择节点",
-                    description = selectedNode?.let {
-                        "${it.protocol.label} · ${it.endpoint?.host ?: "—"}"
-                    } ?: "按移动平均延迟自动切换",
-                    leadingIcon = Icons.Outlined.Dns,
-                    onClick = onOpenNodes,
-                    trailing = {
-                        if (selectedNode != null) {
-                            LatencyBadge(
-                                selectedNode.latencyMs,
-                                tag = if (selectedNode.protocol.isUdpOnly) "ICMP" else null,
-                            )
-                        } else {
-                            Icon(
-                                Icons.Outlined.ChevronRight,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    },
-                )
-                RowDivider()
-                Column(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    KeyValueRow(
-                        "运行时长",
-                        if (status.running && status.startedAt > 0) {
-                            Format.duration((System.currentTimeMillis() - status.startedAt) / 1000)
-                        } else {
-                            "—"
-                        },
-                    )
-                    KeyValueRow(
-                        "内存占用",
-                        if (status.running) Format.memory(status.rssKb) else "—",
-                    )
-                    KeyValueRow(
-                        "开机自启",
-                        when {
-                            status.bootEnabled -> "已开启"
-                            snapshot.settings.bootStart -> "已开启，尚未写入模块"
-                            else -> "已关闭"
-                        },
-                    )
-                    KeyValueRow(
-                        "watchdog",
-                        if (status.watchdog) "运行中" else "未运行",
-                        valueColor = if (status.watchdog) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                    )
-                }
-            }
+            SignalStrip(status = status, bootRequested = snapshot.settings.bootStart)
         }
-
         item {
-            if (aggregateTraffic != null) {
-                SectionCard(
-                    title = "订阅流量",
-                    subtitle = "来自订阅服务器返回的 userinfo",
-                    action = { TextButton(onClick = onOpenSubscriptions) { Text("管理") } },
-                ) {
-                    TrafficBar(aggregateTraffic)
-                }
-            } else {
-                SectionCard(
-                    title = "订阅",
-                    subtitle = "导入节点后才能启动代理",
-                    action = { TextButton(onClick = onOpenSubscriptions) { Text("添加") } },
-                ) {
-                    Text(
-                        "支持分享链接、base64 列表、Clash YAML 与 sing-box JSON。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            ExitSection(selectedNode = selectedNode, onOpenNodes = onOpenNodes)
         }
-
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = viewModel::testAllNodes,
-                    enabled = snapshot.nodes.isNotEmpty() && !busy,
-                    modifier = Modifier.weight(1f),
-                    shape = MaterialTheme.shapes.small,
-                ) { Text("测延迟") }
-                OutlinedButton(
-                    onClick = onOpenLogs,
-                    modifier = Modifier.weight(1f),
-                    shape = MaterialTheme.shapes.small,
-                ) { Text("日志") }
-                OutlinedButton(
-                    onClick = {
-                        showDiagnostics = true
-                        viewModel.diagnose()
-                    },
-                    modifier = Modifier.weight(1f),
-                    shape = MaterialTheme.shapes.small,
-                ) { Text("检查") }
-            }
+            MetricsRow(status = status)
+        }
+        item {
+            ProfilesSection(
+                traffic = aggregateTraffic,
+                onOpenSubscriptions = onOpenSubscriptions,
+            )
+        }
+        item {
+            ActionStrip(
+                canTest = snapshot.nodes.isNotEmpty() && !busy,
+                onTest = viewModel::testAllNodes,
+                onLogs = onOpenLogs,
+                onDiagnose = {
+                    showDiagnostics = true
+                    viewModel.diagnose()
+                },
+            )
         }
     }
 
@@ -261,111 +158,485 @@ fun HomeScreen(
 }
 
 @Composable
-private fun StatusPanel(
+private fun BrandRow(busy: Boolean, daeVersion: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 20.dp, bottom = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "DAEPILOT",
+            style = MaterialTheme.typography.labelLarge.copy(
+                letterSpacing = 2.8.sp,
+                fontWeight = FontWeight.Medium,
+            ),
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            "v${BuildConfig.VERSION_NAME.substringBefore("-debug")} · dae $daeVersion",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (busy) {
+            Spacer(Modifier.width(10.dp))
+            CircularProgressIndicator(
+                modifier = Modifier.size(12.dp),
+                strokeWidth = 1.5.dp,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+@Composable
+private fun Hero(
     status: DaemonStatus,
+    selectedNode: Node?,
     busy: Boolean,
-    bootStart: Boolean,
+    setupLabel: String?,
+    setupLoading: Boolean,
+    onSetup: (() -> Unit)?,
     onToggle: () -> Unit,
 ) {
     val running = status.running
+    val setup = status.mode == "no-root" || status.mode == "module-missing"
     val title = when {
-        running -> "代理运行中"
-        status.mode == "no-root" -> "未授权 root"
-        status.mode == "module-missing" -> "模块未安装"
-        else -> "代理未运行"
+        running -> "运行中"
+        status.mode == "no-root" -> "需要 Root"
+        status.mode == "module-missing" -> "需要模块"
+        else -> "已停止"
     }
     val detail = when {
-        running && status.pid != null -> "PID ${status.pid} · 由模块 watchdog 托管"
-        running -> "由模块 watchdog 托管"
-        status.mode == "no-root" -> "启动时需要允许 root 授权"
-        status.mode == "module-missing" -> "root 已就绪，安装模块后即可启动"
-        bootStart -> "开机时会自动启动"
-        else -> "点击下方按钮启动透明代理"
+        running -> selectedNode?.name ?: "透明代理已接管"
+        status.mode == "no-root" -> "在 Magisk / KernelSU 中授权"
+        status.mode == "module-missing" -> "安装 dae 数据面模块"
+        else -> selectedNode?.name ?: "选择节点后启动"
+    }
+    val eyebrow = when {
+        running -> "ONLINE"
+        setup -> "SETUP"
+        else -> "STANDBY"
+    }
+    val tone = when {
+        running -> MaterialTheme.colorScheme.primary
+        setup -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 30.dp, bottom = 28.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Row(verticalAlignment = Alignment.Top) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(title, style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        detail,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-                Spacer(Modifier.size(12.dp))
-                StatusBadge(if (running) "运行中" else "已停止", running)
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .clip(CircleShape)
+                        .background(tone),
+                )
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    eyebrow,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tone,
+                )
             }
+            Spacer(Modifier.height(13.dp))
+            Text(
+                title,
+                style = MaterialTheme.typography.displaySmall,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (setupLabel != null && onSetup != null) {
+                    Spacer(Modifier.width(6.dp))
+                    TextButton(
+                        onClick = onSetup,
+                        enabled = !setupLoading,
+                        contentPadding = PaddingValues(horizontal = 6.dp),
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.tertiary,
+                        ),
+                    ) {
+                        if (setupLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(12.dp),
+                                strokeWidth = 1.5.dp,
+                                color = MaterialTheme.colorScheme.tertiary,
+                            )
+                        } else {
+                            Text(setupLabel, style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.width(18.dp))
+        PowerButton(running = running, setup = setup, busy = busy, onToggle = onToggle)
+    }
+}
 
-            val buttonModifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
-            if (running) {
-                OutlinedButton(
-                    onClick = onToggle,
-                    enabled = !busy,
-                    modifier = buttonModifier,
-                    shape = MaterialTheme.shapes.small,
-                ) {
-                    ActionLabel(
-                        loading = busy,
-                        icon = { Icon(Icons.Outlined.StopCircle, null, Modifier.size(18.dp)) },
-                        text = "停止代理",
-                    )
-                }
+@Composable
+private fun PowerButton(
+    running: Boolean,
+    setup: Boolean,
+    busy: Boolean,
+    onToggle: () -> Unit,
+) {
+    val fill = if (running) MaterialTheme.colorScheme.primary else Color.Transparent
+    val border = when {
+        running -> MaterialTheme.colorScheme.primary
+        setup -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.outline
+    }
+    val content = when {
+        running -> MaterialTheme.colorScheme.onPrimary
+        setup -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.onBackground
+    }
+    Box(
+        modifier = Modifier
+            .size(74.dp)
+            .clip(CircleShape)
+            .background(fill, CircleShape)
+            .border(1.dp, border, CircleShape)
+            .clickable(enabled = !busy, onClick = onToggle),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(22.dp),
+                strokeWidth = 1.5.dp,
+                color = content,
+            )
+        } else {
+            Icon(
+                Icons.Outlined.PowerSettingsNew,
+                contentDescription = if (running) "停止代理" else "启动代理",
+                tint = content,
+                modifier = Modifier.size(26.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SignalStrip(status: DaemonStatus, bootRequested: Boolean) {
+    val rootReady = status.mode != "no-root"
+    val bootValue = when {
+        status.bootEnabled -> "ON"
+        bootRequested -> "PENDING"
+        else -> "OFF"
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SignalCell(
+            label = "ROOT",
+            value = if (rootReady) "OK" else "—",
+            active = rootReady,
+            modifier = Modifier.weight(1f),
+        )
+        VerticalRule()
+        SignalCell(
+            label = "WATCHDOG",
+            value = if (status.watchdog) "ON" else "OFF",
+            active = status.watchdog,
+            modifier = Modifier.weight(1f),
+        )
+        VerticalRule()
+        SignalCell(
+            label = "BOOT",
+            value = bootValue,
+            active = status.bootEnabled,
+            modifier = Modifier.weight(1f),
+        )
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+@Composable
+private fun SignalCell(
+    label: String,
+    value: String,
+    active: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.padding(top = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(4.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (active) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.outline
+                        },
+                    ),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                value,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Medium,
+                ),
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+}
+
+@Composable
+private fun VerticalRule() {
+    Box(
+        modifier = Modifier
+            .padding(horizontal = 12.dp)
+            .width(1.dp)
+            .height(26.dp)
+            .background(MaterialTheme.colorScheme.outlineVariant),
+    )
+}
+
+@Composable
+private fun ExitSection(selectedNode: Node?, onOpenNodes: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 24.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "EXIT",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.weight(1f))
+        TextButton(onClick = onOpenNodes, contentPadding = PaddingValues(horizontal = 4.dp)) {
+            Text("更换", style = MaterialTheme.typography.labelLarge)
+        }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 24.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                selectedNode?.name ?: "自动选择",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                selectedNode?.let {
+                    "${it.protocol.label} · ${it.endpoint?.host ?: "—"}"
+                } ?: "AUTO",
+                style = if (selectedNode == null) {
+                    MaterialTheme.typography.labelSmall
+                } else {
+                    MaterialTheme.typography.bodySmall
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
+        if (selectedNode != null) {
+            Spacer(Modifier.width(12.dp))
+            LatencyBadge(
+                selectedNode.latencyMs,
+                tag = if (selectedNode.protocol.isUdpOnly) "ICMP" else null,
+            )
+        }
+    }
+}
+
+@Composable
+private fun MetricsRow(status: DaemonStatus) {
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Metric(
+            label = "UPTIME",
+            value = if (status.running && status.startedAt > 0) {
+                Format.duration((System.currentTimeMillis() - status.startedAt) / 1000)
             } else {
-                Button(
-                    onClick = onToggle,
-                    enabled = !busy,
-                    modifier = buttonModifier,
-                    shape = MaterialTheme.shapes.small,
-                ) {
-                    ActionLabel(
-                        loading = busy,
-                        icon = { Icon(Icons.Outlined.PlayArrow, null, Modifier.size(18.dp)) },
-                        text = "启动代理",
-                    )
-                }
+                "—"
+            },
+            modifier = Modifier.weight(1f),
+        )
+        VerticalRule()
+        Metric(
+            label = "MEMORY",
+            value = if (status.running) Format.memory(status.rssKb) else "—",
+            modifier = Modifier.weight(1f),
+        )
+        VerticalRule()
+        Metric(
+            label = "DAE",
+            value = status.version ?: BuildConfig.DAE_VERSION,
+            modifier = Modifier.weight(1f),
+        )
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+@Composable
+private fun Metric(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(top = 5.dp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun ProfilesSection(traffic: TrafficInfo?, onOpenSubscriptions: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 24.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "PROFILES",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.weight(1f))
+        TextButton(onClick = onOpenSubscriptions, contentPadding = PaddingValues(horizontal = 4.dp)) {
+            Text(if (traffic == null) "导入" else "管理", style = MaterialTheme.typography.labelLarge)
+        }
+    }
+    if (traffic == null) {
+        Column(modifier = Modifier.padding(bottom = 22.dp)) {
+            Text(
+                "未导入订阅",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Text(
+                "CLASH · SING-BOX · SHARE LINK",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 5.dp),
+            )
+        }
+    } else {
+        Column(modifier = Modifier.padding(bottom = 22.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                Text(
+                    Format.bytes(traffic.usedBytes),
+                    style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    if (traffic.totalBytes > 0) Format.bytes(traffic.totalBytes) else "—",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(2.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(traffic.usageFraction.coerceIn(0f, 1f))
+                        .height(2.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            }
+            if (traffic.expireAtEpochSeconds > 0) {
+                Text(
+                    "到期 ${Format.expiry(traffic.expireAtEpochSeconds)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ActionLabel(
-    loading: Boolean,
-    icon: @Composable () -> Unit,
-    text: String,
+private fun ActionStrip(
+    canTest: Boolean,
+    onTest: () -> Unit,
+    onLogs: () -> Unit,
+    onDiagnose: () -> Unit,
 ) {
-    if (loading) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(16.dp),
-            strokeWidth = 2.dp,
-            color = LocalContentColor.current,
-        )
-        Spacer(Modifier.size(8.dp))
-        Text("处理中…")
-    } else {
-        icon()
-        Spacer(Modifier.size(8.dp))
-        Text(text)
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        TextButton(onClick = onTest, enabled = canTest) {
+            Text("测延迟", style = MaterialTheme.typography.labelLarge)
+        }
+        TextButton(onClick = onLogs) {
+            Text("日志", style = MaterialTheme.typography.labelLarge)
+        }
+        TextButton(onClick = onDiagnose) {
+            Text("诊断", style = MaterialTheme.typography.labelLarge)
+        }
     }
-}
-
-private fun modeLabel(mode: String): String = when (mode) {
-    "no-root" -> "未授权 root"
-    "module-missing" -> "模块未安装"
-    "chroot" -> "chroot 模式"
-    "unknown" -> "正在读取状态"
-    else -> mode
 }
