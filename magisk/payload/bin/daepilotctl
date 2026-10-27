@@ -287,20 +287,23 @@ stage_config() {
 # "resolve node -> use proxy -> proxy needs node" loop on cellular networks
 # that drop public DNS.
 write_node_hosts() {
-  local hosts_file cache_tmp filters hosts host ip tag line
+  local hosts_file cache_tmp filters hosts host ip tag line running
   hosts_file="$ROOTFS/etc/hosts"
   [ -f "$hosts_file" ] || return 0
   [ -f "$ROOTFS/config/config.dae" ] || return 0
 
-  # On reload the daemon is already capturing DNS; reuse the pins resolved at
-  # startup instead of probing through the live datapath.
-  if is_running; then
-    [ -s "$NODE_HOSTS_CACHE" ] && cat "$NODE_HOSTS_CACHE" >> "$hosts_file"
-    return 0
-  fi
-
   cache_tmp="$NODE_HOSTS_CACHE.tmp.$$"
   : > "$cache_tmp" 2>/dev/null
+  running=0
+  if is_running; then
+    # Keep the pins resolved at startup. Hosts added by a live config apply
+    # are resolved below through dae's now-working DNS path.
+    running=1
+    if [ -s "$NODE_HOSTS_CACHE" ]; then
+      cat "$NODE_HOSTS_CACHE" >> "$hosts_file"
+      cp "$NODE_HOSTS_CACHE" "$cache_tmp"
+    fi
+  fi
 
   # Prefer hosts referenced by the proxy group; a large subscription must not
   # turn startup into a serial ping storm.
@@ -332,12 +335,16 @@ write_node_hosts() {
     grep -q "[[:space:]]$host$" "$cache_tmp" 2>/dev/null && continue
     ip="$(ping -c 1 -W 2 "$host" 2>/dev/null \
       | sed -n 's/^PING [^(]*(\([0-9a-fA-F:.]*\)).*/\1/p' | head -n 1)"
-    [ -n "$ip" ] && printf '%s %s\n' "$ip" "$host" >> "$cache_tmp"
+    case "$ip" in
+      ""|*:*) continue ;; # only stable IPv4 pins
+    esac
+    printf '%s %s\n' "$ip" "$host" >> "$cache_tmp"
+    [ "$running" = "1" ] && printf '%s %s\n' "$ip" "$host" >> "$hosts_file"
   done
 
   if [ -s "$cache_tmp" ]; then
     mv "$cache_tmp" "$NODE_HOSTS_CACHE" 2>/dev/null
-    cat "$NODE_HOSTS_CACHE" >> "$hosts_file" 2>/dev/null
+    [ "$running" = "0" ] && cat "$NODE_HOSTS_CACHE" >> "$hosts_file" 2>/dev/null
   else
     rm -f "$cache_tmp" 2>/dev/null
   fi
