@@ -101,8 +101,15 @@ class LogUploader(
                 Regex("""(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@"""),
                 "${'$'}1<redacted>@",
             )
-            return if (credentialsMasked.length <= maxChars) credentialsMasked
-            else credentialsMasked.take(maxChars) + "\n…（已截断）"
+            // vmess:// and ssr:// hide their credential in an opaque base64 body
+            // with no '@', so the userinfo rule above never fires.
+            val opaqueMasked = credentialsMasked.replace(OPAQUE_PAYLOAD) {
+                it.value.substringBefore("://") + "://<redacted>"
+            }
+            return if (opaqueMasked.length <= maxChars) opaqueMasked
+            else opaqueMasked.take(maxChars) + "\n…（已截断）"
         }
+
+        private val OPAQUE_PAYLOAD = Regex("""(?i)\b(?:vmess|ssr)://[A-Za-z0-9_\-.=]+""")
     }
 }

@@ -3,6 +3,7 @@ package io.github.daepilot.data.net
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import java.util.Base64
 
 class LogUploaderTest {
     @Test
@@ -29,5 +30,21 @@ class LogUploaderTest {
         val clean = LogUploader.sanitizeLog(raw, maxChars = 20)
         assertFalse(clean.contains("\u001B"))
         assertTrue(clean.endsWith("…（已截断）"))
+    }
+
+    @Test
+    fun masksOpaquePayloadsThatCarryNoUserInfo() {
+        val enc = Base64.getUrlEncoder().withoutPadding()
+        val ssr = enc.encodeToString(
+            "hk.example.com:443:auth_aes128_sha1:aes-256-cfnm:sup3rsecret:plain".toByteArray(),
+        )
+        val vmess = enc.encodeToString(
+            """{"ps":"HK","add":"hk.example.com","id":"11111111-2222-3333-4444-555555555555"}""".toByteArray(),
+        )
+        val clean = LogUploader.sanitizeLog("校验失败: ssr://$ssr vmess://$vmess#HK")
+        assertFalse(clean.contains(ssr))
+        assertFalse(clean.contains(vmess))
+        assertTrue(clean.contains("ssr://<redacted>"))
+        assertTrue(clean.contains("vmess://<redacted>#HK"))
     }
 }
