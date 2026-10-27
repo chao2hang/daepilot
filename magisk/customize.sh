@@ -9,7 +9,7 @@ LATESTARTSERVICE=true
 BASE=/data/adb/daepilot
 
 ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-ui_print " DaePilot 翼航 · dae eBPF 数据面"
+ui_print " DaePilot · dae eBPF 数据面"
 ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "$BOOTMODE" != true ]; then

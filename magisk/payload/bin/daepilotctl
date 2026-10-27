@@ -33,6 +33,7 @@ HOST_PID="$RUN/dae.host.pid"
 DAE_PID="$ROOTFS/run/dae.pid"
 WATCH_PID="$RUN/watchdog.pid"
 DNS_SERVERS="$RUN/dns.servers"
+CONNECTIVITY_DUMP="$RUN/connectivity.dump"
 ENABLED="$BASE/enabled"
 BOOT_ENABLED="$BASE/boot_enabled"
 VERSION_FILE="$BASE/bin/VERSION"
@@ -172,6 +173,25 @@ add_nameserver() {
   echo "nameserver $ns" >> "$resolv_tmp"
 }
 
+# Cache `dumpsys connectivity` in a file. Beyond being reused by both the
+# resolver and the DNS upstream logic, the dump can exceed the 128KB limit for
+# a single execve argument, which breaks printf/echo-based parsing.
+refresh_connectivity_dump() {
+  have dumpsys || return 1
+  mkdir -p "$RUN" 2>/dev/null
+  if have timeout; then
+    timeout 8 dumpsys connectivity > "$CONNECTIVITY_DUMP.tmp" 2>/dev/null
+  else
+    dumpsys connectivity > "$CONNECTIVITY_DUMP.tmp" 2>/dev/null
+  fi
+  if [ -s "$CONNECTIVITY_DUMP.tmp" ]; then
+    mv "$CONNECTIVITY_DUMP.tmp" "$CONNECTIVITY_DUMP" 2>/dev/null
+    return 0
+  fi
+  rm -f "$CONNECTIVITY_DUMP.tmp" 2>/dev/null
+  [ -s "$CONNECTIVITY_DUMP" ]
+}
+
 write_resolv() {
   mkdir -p "$ROOTFS/etc" 2>/dev/null
   resolv_tmp="$ROOTFS/etc/resolv.conf.new"
@@ -186,15 +206,19 @@ write_resolv() {
 
   # dumpsys is the live source of truth. Read it even when the app already
   # published DNS: after a Wi-Fi/cellular switch run/dns.servers can still
-  # contain the previous network's resolvers.
-  if have dumpsys; then
-    if have timeout; then
-      dump="$(timeout 8 dumpsys connectivity 2>/dev/null)"
-    else
-      dump="$(dumpsys connectivity 2>/dev/null)"
+  # contain the previous network's resolvers. Keep the output in a file: the
+  # dump is far beyond the 128KB single-argument limit of execve.
+  if refresh_connectivity_dump; then
+    # Lead with the active WAN's resolvers: the dump also lists IMS/VPN
+    # networks whose DNS can be unreachable from the default link, and Go's
+    # resolver gives up quickly when the first nameserver does not answer.
+    active_wan="$(detect_wan_interface 2>/dev/null)"
+    if [ -n "$active_wan" ]; then
+      wan_ipv4_dns "$active_wan" | while IFS= read -r ns; do
+        add_nameserver "$ns"
+      done
     fi
-    printf '%s\n' "$dump" \
-      | sed -n 's/.*DnsAddresses: \[\([^]]*\)\].*/\1/p' \
+    sed -n 's/.*DnsAddresses: \[\([^]]*\)\].*/\1/p' "$CONNECTIVITY_DUMP" \
       | tr ', ' '\n\n' \
       | while IFS= read -r ns; do
           add_nameserver "$ns"
@@ -318,27 +342,97 @@ detect_wan_interface() {
   printf '%s\n' "$dev"
 }
 
+# Print up to two IPv4 resolvers of the active WAN. Several cellular carriers
+# drop queries to public resolvers such as 119.29.29.29 while their own
+# resolvers keep working, so dae's domestic upstream must follow the network.
+wan_ipv4_dns() {
+  local wan line ns addr seen n
+  wan="$1"
+  [ -n "$wan" ] || return 0
+  [ -s "$CONNECTIVITY_DUMP" ] || refresh_connectivity_dump || return 0
+  line="$(grep -F "InterfaceName: $wan" "$CONNECTIVITY_DUMP" 2>/dev/null | head -n 1)"
+  # Some ROMs omit InterfaceName; fall back to the first network with DNS.
+  [ -n "$line" ] || line="$(grep -F 'DnsAddresses:' "$CONNECTIVITY_DUMP" 2>/dev/null | head -n 1)"
+  [ -n "$line" ] || return 0
+  ns="$(printf '%s\n' "$line" | sed -n 's/.*DnsAddresses: \[\([^]]*\)\].*/\1/p')"
+  [ -n "$ns" ] || return 0
+  seen=" "
+  n=0
+  for addr in $(printf '%s' "$ns" | tr ', ' '\n\n'); do
+    addr="${addr#/}"
+    addr="${addr%%\%*}"
+    case "$addr" in ""|*[!0-9.]*) continue ;; esac
+    case "$addr" in 0.0.0.0|127.*|169.254.*) continue ;; esac
+    case "$seen" in *" $addr "*) continue ;; esac
+    seen="$seen$addr "
+    printf '%s\n' "$addr"
+    n=$((n + 1))
+    [ "$n" -ge 2 ] && break
+  done
+}
+
 # Copy a rendered config into place, replacing dae's "auto" WAN with the
 # interface Android is actually using. The app keeps writing "auto" so the
 # same rendered config remains portable across Wi-Fi and cellular.
+# The built-in domestic resolver is swapped for the WAN's live resolver for
+# the same reason; a customized upstream is left untouched.
+# dae's bootstrap resolver does not consult /etc/hosts on this build, so a
+# node URL left as a hostname cannot be dialed when public DNS is blocked.
+# Replace pinned hostnames with the IPv4 addresses resolved by
+# write_node_hosts and keep loop protection in sync.
+pin_node_urls() {
+  local file tmp ip host esc
+  file="$1"
+  [ -f "$file" ] || return 0
+  [ -s "$NODE_HOSTS_CACHE" ] || return 0
+  tmp="$file.pin.$$"
+  cp "$file" "$tmp" 2>/dev/null || return 0
+  while read -r ip host; do
+    case "$ip" in ""|*[!0-9.]*) continue ;; esac
+    case "$host" in ""|*[!A-Za-z0-9.-]*) continue ;; esac
+    esc="$(printf '%s' "$host" | sed 's/\./\\./g')"
+    if sed -e "s/@$esc:/@$ip:/g" -e "s/domain($esc)/dip($ip)/g" \
+        "$tmp" > "$tmp.next" 2>/dev/null; then
+      mv "$tmp.next" "$tmp" 2>/dev/null
+    else
+      rm -f "$tmp.next" 2>/dev/null
+    fi
+  done < "$NODE_HOSTS_CACHE"
+  if [ -s "$tmp" ]; then
+    mv "$tmp" "$file" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+}
+
 stage_config() {
-  local src dst wan tmp norm
+  local src dst wan tmp norm dns1
   src="$1"
   dst="$2"
   wan="$(detect_wan_interface 2>/dev/null)"
+  dns1=""
+  [ -n "$wan" ] && dns1="$(wan_ipv4_dns "$wan" 2>/dev/null | head -n 1)"
   tmp="$dst.tmp.$$"
   norm="$dst.norm.$$"
   # Normalize CRLF first: a Windows-edited config otherwise fails to match
   # "wan_interface: auto" and the daemon silently keeps dae's broken auto mode.
   if tr -d '\r' < "$src" > "$norm" 2>/dev/null; then
-    if [ -n "$wan" ]; then
+    if [ -n "$wan" ] && [ -n "$dns1" ]; then
+      sed -e "s/^\([[:space:]]*wan_interface:[[:space:]]*\)auto[[:space:]]*$/\1$wan/" \
+        -e "s/^\([[:space:]]*alidns:[[:space:]]*\)'udp:\/\/119\.29\.29\.29:53'/\1'udp:\/\/$dns1:53'/" \
+        "$norm" > "$tmp" 2>/dev/null
+    elif [ -n "$wan" ]; then
       sed "s/^\([[:space:]]*wan_interface:[[:space:]]*\)auto[[:space:]]*$/\1$wan/" \
+        "$norm" > "$tmp" 2>/dev/null
+    elif [ -n "$dns1" ]; then
+      sed "s/^\([[:space:]]*alidns:[[:space:]]*\)'udp:\/\/119\.29\.29\.29:53'/\1'udp:\/\/$dns1:53'/" \
         "$norm" > "$tmp" 2>/dev/null
     else
       cp "$norm" "$tmp" 2>/dev/null
     fi
     rm -f "$norm" 2>/dev/null
     if [ -s "$tmp" ] && mv "$tmp" "$dst" 2>/dev/null; then
+      pin_node_urls "$dst"
       return 0
     fi
     rm -f "$tmp" 2>/dev/null
@@ -441,6 +535,7 @@ prepare_chroot() {
   fi
   ensure_geodata || return 1
   write_node_hosts
+  pin_node_urls "$ROOTFS/config/config.dae"
   chmod 700 "$ROOTFS/config" 2>/dev/null
 }
 
@@ -570,8 +665,12 @@ dae_pids() {
     done
   fi
   if [ -z "$found" ]; then
-    for dir in /proc/[0-9]*; do
-      pid="${dir#/proc/}"
+    # One grep over all cmdline files is far cheaper than forking tr/sed for
+    # every process: the per-PID loop added ~14s to every daemon restart on
+    # large ROMs. The bracketed dot keeps grep from matching itself.
+    for file in $(grep -l -a 'run -c /config/config[.]dae' /proc/[0-9]*/cmdline 2>/dev/null); do
+      pid="${file#/proc/}"
+      pid="${pid%/cmdline}"
       if is_our_dae "$pid"; then found="$found $pid"; fi
     done
   fi
@@ -589,16 +688,20 @@ watchdog_pid() {
     fi
   fi
   if [ -z "$pid" ]; then
-    for dir in /proc/[0-9]*; do
-      candidate="${dir#/proc/}"
-      [ -r "$dir/cmdline" ] || continue
-      cmd="$(tr '\000' ' ' < "$dir/cmdline" 2>/dev/null)"
+    # Same batched scan as dae_pids; the bracket keeps grep from matching the
+    # pattern in its own command line.
+    for file in $(grep -l -a 'daepilotctl [w]atch' /proc/[0-9]*/cmdline 2>/dev/null); do
+      candidate="${file#/proc/}"
+      candidate="${candidate%/cmdline}"
+      [ "$candidate" = "$$" ] && continue
+      cmd="$(tr '\000' ' ' < "$file" 2>/dev/null)"
       case "$cmd" in
-        *"daepilotctl watch"*)
-          state="$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$candidate/stat" 2>/dev/null)"
-          [ "$state" = "Z" ] && continue
-          pid="$candidate"; break ;;
+        *"daepilotctl watch"*) ;;
+        *) continue ;;
       esac
+      state="$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$candidate/stat" 2>/dev/null)"
+      [ "$state" = "Z" ] && continue
+      pid="$candidate"; break
     done
   fi
   [ -n "$pid" ] || return 1

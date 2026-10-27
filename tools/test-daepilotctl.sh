@@ -205,7 +205,11 @@ EOF
 
 cat > "$WORK/fakebin/dumpsys" <<'EOF'
 #!/bin/sh
+if [ "${FAKE_MOBILE:-0}" = "1" ]; then
+  echo 'NetworkAgentInfo{network{101} lp{{InterfaceName: rmnet_data3 DnsAddresses: [ /10.2.164.1, /10.2.164.2 ]}}}'
+fi
 if [ "${FAKE_DUMPSYS:-0}" = "1" ]; then
+  echo 'NetworkAgentInfo{network{99} lp{{InterfaceName: rmnet_data1 DnsAddresses: [ /114.114.114.114 ]}}}'
   echo 'NetworkAgentInfo{network{100} lp{{InterfaceName: eth0 DnsAddresses: [ /10.0.2.3, /2001:db8::54 ]}}}'
 fi
 exit 0
@@ -532,9 +536,73 @@ assert_eq "$rc" "0" "node switch apply succeeds"
 printf '%s
 ' "$out" > "$WORK/node-switch.out"
 assert_contains "$WORK/node-switch.out" "节点服务器已变化" "node switch triggers a restart"
-assert_contains "$BASE/rootfs/etc/hosts" "203.0.113.9 b.example" \
-  "new node host is pinned after the restart"
+assert_contains "$BASE/rootfs/config/config.dae" "@203.0.113.9:443" \
+  "new node URL is pinned after the restart"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null; DAEMON_PID=""
+
+# 16. The built-in domestic resolver is dropped by some carriers. It must be
+#     replaced with the active WAN's live resolver, while a user-customized
+#     upstream is preserved.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_DUMPSYS=1
+cat > "$BASE/staging/config.dae" <<'EOF'
+global {
+  wan_interface: auto
+}
+dns {
+  upstream {
+    alidns: 'udp://119.29.29.29:53'
+    googledns: 'tcp+udp://8.8.8.8:53'
+  }
+}
+EOF
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with default domestic resolver succeeds"
+assert_contains "$BASE/rootfs/config/config.dae" "alidns: 'udp://10.0.2.3:53'" \
+  "built-in domestic resolver follows the WAN's live DNS"
+assert_contains "$BASE/rootfs/config/config.dae" "googledns: 'tcp+udp://8.8.8.8:53'" \
+  "foreign resolver is left unchanged"
+
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_DUMPSYS=1
+cat > "$BASE/staging/config.dae" <<'EOF'
+global {
+  log_level: info
+}
+dns {
+  upstream {
+    alidns: 'udp://192.0.2.53:53'
+  }
+}
+EOF
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with custom domestic resolver succeeds"
+assert_contains "$BASE/rootfs/config/config.dae" "alidns: 'udp://192.0.2.53:53'" \
+  "custom domestic resolver is preserved"
+assert_not_contains "$BASE/rootfs/config/config.dae" "udp://10.0.2.3:53" \
+  "live resolver does not overwrite a custom upstream"
+
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_MOBILE=1
+cat > "$BASE/staging/config.dae" <<'EOF'
+global {
+  wan_interface: auto
+}
+dns {
+  upstream {
+    alidns: 'udp://119.29.29.29:53'
+  }
+}
+EOF
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply on cellular with default resolver succeeds"
+assert_contains "$BASE/rootfs/config/config.dae" "alidns: 'udp://10.2.164.1:53'" \
+  "cellular resolver is taken from the active rmnet interface"
+FAKE_MOBILE=""
+FAKE_DUMPSYS=""
 
 # 8. The chroot must live in a private mount namespace and never unmount
 #    host-visible mounts (the /dev/binderfs regression).

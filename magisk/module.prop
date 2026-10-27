@@ -1,6 +1,6 @@
 id=daepilot
 name=DaePilot
-version=v0.1.7
-versionCode=8
+version=v0.1.8
+versionCode=9
 author=DaePilot contributors
 description=dae eBPF 数据面 · chroot + watchdog · arm64 / root
