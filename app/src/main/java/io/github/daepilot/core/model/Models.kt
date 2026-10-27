@@ -171,6 +171,11 @@ data class DaemonStatus(
     val bootEnabled: Boolean = false,
     val watchdog: Boolean = false,
     val desiredRunning: Boolean = false,
+    val wan: String? = null,
+    val wanIp: String? = null,
+    val node: String? = null,
+    val dns: String? = null,
+    val dnsMode: String? = null,
 )
 
 @Serializable

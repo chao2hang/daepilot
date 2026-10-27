@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -24,38 +25,45 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.github.daepilot.core.model.CompatibilityReport
+import io.github.daepilot.core.model.DaemonStatus
 
 @Composable
 fun DiagnosticsDialog(
     report: CompatibilityReport?,
+    status: DaemonStatus?,
     loading: Boolean,
     onRun: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("兼容性检查") },
+        title = { Text("诊断") },
         text = {
-            if (loading) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 24.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Text("正在检查…", modifier = Modifier.padding(start = 12.dp))
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (status != null) {
+                    NetworkSection(status)
+                    HorizontalDivider()
+                    Text("兼容性", style = MaterialTheme.typography.titleSmall)
                 }
-            } else if (report == null) {
-                Text("尚未运行检查。检查需要 root 权限。")
-            } else {
-                Column(
-                    modifier = Modifier
-                        .heightIn(max = 420.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
+                if (loading) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 24.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Text("正在检查…", modifier = Modifier.padding(start = 12.dp))
+                    }
+                } else if (report == null) {
+                    Text("尚未运行兼容性检查。检查需要 root 权限。")
+                } else {
                     CheckRow("Root 权限", report.rootAvailable, if (report.rootAvailable) "已授权" else "未授权")
                     CheckRow(
                         "Magisk 模块",
@@ -97,14 +105,16 @@ fun DiagnosticsDialog(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    report.note?.takeIf { it.isNotBlank() }?.let { note ->
-                        HorizontalDivider()
-                        Text(
-                            note,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    report.note
+                        ?.takeIf { it.isNotBlank() && it != status?.lastError }
+                        ?.let { note ->
+                            HorizontalDivider()
+                            Text(
+                                note,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                 }
             }
         },
@@ -115,6 +125,47 @@ fun DiagnosticsDialog(
             TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
+}
+
+@Composable
+private fun NetworkSection(status: DaemonStatus) {
+    Text("网络", style = MaterialTheme.typography.titleSmall)
+    val iface = listOfNotNull(
+        status.wan?.takeIf { it.isNotBlank() },
+        status.wanIp?.takeIf { it.isNotBlank() },
+    ).joinToString(" · ").ifBlank { "—" }
+    NetworkRow("接口", iface)
+    NetworkRow("DNS", status.dns?.takeIf { it.isNotBlank() } ?: "—")
+    NetworkRow(
+        "DNS 模式",
+        if (status.dnsMode == "proxy") "国内解析经代理（蜂窝）" else "直连",
+    )
+    NetworkRow("节点", status.node?.takeIf { it.isNotBlank() } ?: "—")
+    status.lastError?.takeIf { it.isNotBlank() }?.let {
+        NetworkRow("最近错误", it, error = true)
+    }
+}
+
+@Composable
+private fun NetworkRow(label: String, value: String, error: Boolean = false) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(58.dp),
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+    }
 }
 
 @Composable

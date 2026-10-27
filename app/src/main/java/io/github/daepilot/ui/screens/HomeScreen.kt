@@ -150,6 +150,7 @@ fun HomeScreen(
     if (showDiagnostics) {
         DiagnosticsDialog(
             report = compatibility,
+            status = status,
             loading = busy,
             onRun = viewModel::diagnose,
             onDismiss = { showDiagnostics = false },

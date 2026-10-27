@@ -606,6 +606,89 @@ assert_contains "$BASE/rootfs/config/config.dae" "alidns: 'udp://10.2.164.1:53'"
 FAKE_MOBILE=""
 FAKE_DUMPSYS=""
 
+# 17. On cellular the datapath captures dae's own public-DNS queries, so the
+#     domestic lookup rule must fall back to the proxy resolver. Wi-Fi keeps
+#     the direct resolver.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_MOBILE=1
+FAKE_DUMPSYS=1
+cat > "$BASE/staging/config.dae" <<'EOF'
+global {
+  wan_interface: auto
+}
+dns {
+  upstream {
+    alidns: 'udp://119.29.29.29:53'
+    googledns: 'tcp+udp://8.8.8.8:53'
+  }
+  routing {
+    request {
+      qname(geosite:cn) -> alidns
+      fallback: googledns
+    }
+  }
+}
+node {
+  a: 'trojan://pw@a.example:443#a'
+}
+group {
+  proxy {
+    filter: name('a')
+    policy: fixed(0)
+  }
+}
+routing {
+  fallback: proxy
+}
+EOF
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply on cellular with proxy DNS succeeds"
+assert_contains "$BASE/rootfs/config/config.dae" "qname(geosite:cn) -> googledns" \
+  "cellular domestic DNS is routed through the proxy"
+assert_contains "$BASE/rootfs/config/config.dae" "alidns: 'udp://10.2.164.1:53'" \
+  "cellular resolver is still injected for other lookups"
+FAKE_MOBILE=""
+
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_DUMPSYS=1
+cat > "$BASE/staging/config.dae" <<'EOF'
+global {
+  wan_interface: auto
+}
+dns {
+  upstream {
+    alidns: 'udp://119.29.29.29:53'
+    googledns: 'tcp+udp://8.8.8.8:53'
+  }
+  routing {
+    request {
+      qname(geosite:cn) -> alidns
+      fallback: googledns
+    }
+  }
+}
+node {
+  a: 'trojan://pw@a.example:443#a'
+}
+group {
+  proxy {
+    filter: name('a')
+    policy: fixed(0)
+  }
+}
+routing {
+  fallback: proxy
+}
+EOF
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply on Wi-Fi with direct DNS succeeds"
+assert_contains "$BASE/rootfs/config/config.dae" "qname(geosite:cn) -> alidns" \
+  "Wi-Fi domestic DNS keeps the direct resolver"
+FAKE_MOBILE=""
+FAKE_DUMPSYS=""
+
 # 8. The chroot must live in a private mount namespace and never unmount
 #    host-visible mounts (the /dev/binderfs regression).
 assert_contains "$CTL_SRC" "exec_in_private_ns" "ctl has the private-mount-namespace entry point"

@@ -500,6 +500,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 append("watchdog=${status.watchdog} ")
                 append("bootEnabled=${status.bootEnabled} ")
                 append("rssKb=${status.rssKb} ")
+                append("wan=${status.wan ?: "-"}/${status.wanIp ?: "-"} ")
+                append("node=${status.node ?: "-"} ")
+                append("dns=${status.dns ?: "-"} ")
+                append("dnsMode=${status.dnsMode ?: "-"} ")
                 append("lastError=${status.lastError ?: "-"}")
             },
             note = "manual upload",

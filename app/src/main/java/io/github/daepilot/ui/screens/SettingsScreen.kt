@@ -230,7 +230,8 @@ fun SettingsScreen(
         item {
             ListGroup {
                 ListRow(
-                    title = "兼容性检查",
+                    title = "运行诊断",
+                    description = "网络 · DNS · 内核",
                     leadingIcon = Icons.Outlined.MonitorHeart,
                     onClick = {
                         showDiagnostics = true
@@ -352,6 +353,7 @@ fun SettingsScreen(
     if (showDiagnostics) {
         DiagnosticsDialog(
             report = compatibility,
+            status = status,
             loading = false,
             onRun = viewModel::diagnose,
             onDismiss = { showDiagnostics = false },

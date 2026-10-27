@@ -49,6 +49,11 @@ class DaemonController(
             bootEnabled = values["boot_enabled"] == "1",
             watchdog = values["watchdog"] == "1",
             desiredRunning = values["enabled"] == "1",
+            wan = values["wan"]?.takeIf { it.isNotBlank() },
+            wanIp = values["wan_ip"]?.takeIf { it.isNotBlank() },
+            node = values["node"]?.takeIf { it.isNotBlank() },
+            dns = values["dns"]?.takeIf { it.isNotBlank() },
+            dnsMode = values["dns_mode"]?.takeIf { it.isNotBlank() },
         )
     }
 
