@@ -1,0 +1,1 @@
+allow magiskdomain self:bpf { map_create map_read map_write prog_load prog_run }

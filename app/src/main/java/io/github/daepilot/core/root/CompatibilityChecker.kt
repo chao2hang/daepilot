@@ -32,6 +32,15 @@ class CompatibilityChecker(private val root: RootShell) {
             if [ -f ${DaePaths.MODULE_PROP} ]; then echo "MODULE=1"; else echo "MODULE=0"; fi
             if [ -x ${DaePaths.DAE} ]; then echo "DAEBIN=1"; else echo "DAEBIN=0"; fi
             echo "DAEVER=${'$'}(${DaePaths.DAE} --version 2>/dev/null | head -n 1)"
+            # Whether pname routing actually attached, per the daemon's own log: a
+            # mounted cgroup v2 does not imply the hook could be installed. dae
+            # emits one "Bind to WAN" line per control plane right after the
+            # warning, so the warning belongs to the live generation iff it sits
+            # after the second-to-last of them.
+            awk '/Bind to WAN/ { prev = last; last = NR }
+                 /pname routing cannot be used/ { warn = NR }
+                 END { printf "PNAME_WARN=%d\nPNAME_PREV=%d\n", warn, prev }' \
+              ${DaePaths.LOG} 2>/dev/null || echo "PNAME_WARN=0"
             echo "PROCS=${'$'}(ps -A -o NAME= 2>/dev/null | tr '\n' ' ')"
             if [ -d /data/adb/box ]; then echo "BOXFILES=1"; else echo "BOXFILES=0"; fi
             echo "IPT=${'$'}(iptables -t mangle -S 2>/dev/null | grep -ciE 'box|clash|sing-box|mihomo' || true)"
@@ -80,6 +89,7 @@ class CompatibilityChecker(private val root: RootShell) {
             daeVersion = values["DAEVER"]?.takeIf { it.isNotBlank() && it != "null" },
             conflicts = conflicts,
             selinuxMode = values["SELINUX"].orEmpty(),
+            pnameRouting = pnameRouting(values["PNAME_WARN"]?.toLongOrNull(), values["PNAME_PREV"]?.toLongOrNull()),
         )
     }
 
@@ -98,6 +108,17 @@ class CompatibilityChecker(private val root: RootShell) {
         fun parseKernel(release: String): Pair<Int, Int> {
             val match = Regex("""(\d+)\.(\d+)""").find(release) ?: return 0 to 0
             return match.groupValues[1].toInt() to match.groupValues[2].toInt()
+        }
+
+        /**
+         * Three-state on purpose: before the daemon has created a control plane
+         * there is nothing to report, and "supported" must not be inferred from a
+         * mounted cgroup v2 — only the attach result says whether `pname` works.
+         */
+        fun pnameRouting(warnLine: Long?, previousGenerationLine: Long?): Boolean? {
+            val warn = warnLine ?: 0L
+            if (warn == 0L) return null
+            return warn <= (previousGenerationLine ?: 0L)
         }
     }
 }

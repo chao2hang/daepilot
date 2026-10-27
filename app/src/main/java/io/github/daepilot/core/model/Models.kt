@@ -196,6 +196,8 @@ data class CompatibilityReport(
     val daeVersion: String? = null,
     val conflicts: List<String> = emptyList(),
     val selinuxMode: String = "",
+    /** Null until the daemon reports one; false means `pname` rules are inert. */
+    val pnameRouting: Boolean? = null,
     val note: String? = null,
 ) {
     val ready: Boolean

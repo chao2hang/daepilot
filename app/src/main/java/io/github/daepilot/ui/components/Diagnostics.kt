@@ -82,6 +82,13 @@ fun DiagnosticsDialog(
                     )
                     CheckRow("BTF", report.btfPresent, "/sys/kernel/btf/vmlinux")
                     CheckRow("cgroup v2", report.cgroup2Mounted, "cgroup connect 钩子")
+                    report.pnameRouting?.let { live ->
+                        CheckRow(
+                            "pname 进程分流",
+                            live,
+                            if (live) "cgroup 钩子已挂载" else "钩子挂载失败，分应用绕过不生效",
+                        )
+                    }
                     CheckRow("BPF JIT", report.bpfJitEnabled, "eBPF 执行")
                     CheckRow("可用内存", report.memoryOk, "${report.memAvailableMb} MB（最低 150 MB）")
                     CheckRow(

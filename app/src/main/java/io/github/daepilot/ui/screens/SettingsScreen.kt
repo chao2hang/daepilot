@@ -385,6 +385,7 @@ fun SettingsScreen(
     if (showBypassDialog) {
         BypassDialog(
             current = snapshot.settings.bypassPackages,
+            pnameUnavailable = compatibility?.pnameRouting == false,
             onDismiss = { showBypassDialog = false },
             onSave = {
                 viewModel.setBypassPackages(it)
@@ -503,6 +504,7 @@ private fun LogLevelDialog(
 @Composable
 private fun BypassDialog(
     current: List<String>,
+    pnameUnavailable: Boolean,
     onDismiss: () -> Unit,
     onSave: (List<String>) -> Unit,
 ) {
@@ -512,6 +514,13 @@ private fun BypassDialog(
         title = { Text("分应用绕过") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (pnameUnavailable) {
+                    Text(
+                        "本机 dae 未能挂载 cgroup 钩子，pname 规则不会生效——保存后这些进程仍会走代理。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 Text(
                     "填写进程名（pname），每行一个，也可用逗号分隔。",
                     style = MaterialTheme.typography.bodySmall,

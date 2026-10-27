@@ -87,9 +87,10 @@ set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/action.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 
-# Optional live policy hook for SELinux-enforcing devices where the magisk
-# domain is not permitted to call bpf(). Most devices (including the target
-# Xiaomi/HyperOS unit) need no change; failure here is intentionally non-fatal.
+# SELinux policy for the bpf() syscalls dae needs. sepolicy.rule is what applies
+# on every boot; this --live call only makes the grant effective for the boot
+# the module was flashed in, so the user does not have to reboot first. Failure
+# is non-fatal: some kernels already allow these without a rule.
 if command -v magiskpolicy >/dev/null 2>&1; then
   magiskpolicy --live "allow magiskdomain self:bpf { map_create map_read map_write prog_load prog_run }" 2>/dev/null || true
 fi

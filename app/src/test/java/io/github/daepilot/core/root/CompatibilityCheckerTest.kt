@@ -1,6 +1,7 @@
 package io.github.daepilot.core.root
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class CompatibilityCheckerTest {
@@ -23,5 +24,24 @@ class CompatibilityCheckerTest {
     fun returnsZeroForUnknownRelease() {
         assertEquals(0 to 0, CompatibilityChecker.parseKernel("unknown"))
         assertEquals(0 to 0, CompatibilityChecker.parseKernel(""))
+    }
+
+    @Test
+    fun noWarningLineMeansNothingReportedYet() {
+        assertNull(CompatibilityChecker.pnameRouting(0L, 0L))
+        assertNull(CompatibilityChecker.pnameRouting(null, null))
+    }
+
+    @Test
+    fun warningInLiveGenerationMeansPnameIsDead() {
+        // The warning sits after the previous control plane, so it belongs to
+        // the one that is running now.
+        assertEquals(false, CompatibilityChecker.pnameRouting(80L, 10L))
+        assertEquals(false, CompatibilityChecker.pnameRouting(80L, null))
+    }
+
+    @Test
+    fun warningOnlyFromAnOlderGenerationMeansPnameWorks() {
+        assertEquals(true, CompatibilityChecker.pnameRouting(10L, 80L))
     }
 }
