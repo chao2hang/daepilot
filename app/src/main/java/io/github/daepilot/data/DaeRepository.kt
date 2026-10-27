@@ -354,10 +354,12 @@ class DaeRepository(
 
     private suspend fun persistLatency(results: List<LatencyResult>) {
         val now = System.currentTimeMillis()
-        // Single transaction instead of one UPDATE round-trip per node.
+        // Single transaction instead of one UPDATE round-trip per node. Failed
+        // probes keep their timestamp too: it is the only thing that lets the
+        // list tell a node that was tested from one that never was.
         db.withTransaction {
             results.forEach { result ->
-                nodeDao.updateLatency(result.nodeId, result.latencyMs, if (result.latencyMs != null) now else 0L)
+                nodeDao.updateLatency(result.nodeId, result.latencyMs, now)
             }
         }
     }

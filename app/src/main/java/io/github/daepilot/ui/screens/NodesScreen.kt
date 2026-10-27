@@ -322,7 +322,14 @@ private fun NodeRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            LatencyBadge(node.latencyMs, tag = if (node.protocol.isUdpOnly) "ICMP" else null)
+            // lastTestedAt is the only trace a probe left behind: the error text
+            // is not persisted, so "tested and failed" has to be told apart from
+            // "never tested" by the timestamp.
+            LatencyBadge(
+                millis = node.latencyMs,
+                error = if (node.latencyMs == null && node.lastTestedAt > 0) "不可用" else null,
+                tag = if (node.protocol.isUdpOnly) "ICMP" else null,
+            )
             Box {
                 IconButton(onClick = { menuOpen = true }) {
                     Icon(
