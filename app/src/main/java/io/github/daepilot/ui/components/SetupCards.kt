@@ -20,6 +20,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import io.github.daepilot.ui.theme.LocalDaeGlassPalette
 
 @Composable
 fun RootSetupCard(
@@ -75,7 +76,7 @@ private fun SetupNotice(
                 modifier = Modifier
                     .size(6.dp)
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.tertiary),
+                    .background(LocalDaeGlassPalette.current.warning),
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {

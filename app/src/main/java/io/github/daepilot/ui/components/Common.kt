@@ -35,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.daepilot.core.model.TrafficInfo
 import io.github.daepilot.ui.Format
+import io.github.daepilot.ui.theme.LocalDaeGlassPalette
 
 val ScreenEdge = 20.dp
 val ScreenBottom = 132.dp
@@ -175,8 +176,9 @@ fun ListRow(
 @Composable
 fun RowDivider() {
     HorizontalDivider(
-        modifier = Modifier.padding(start = 16.dp),
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+        modifier = Modifier.padding(horizontal = 16.dp),
+        thickness = 0.75.dp,
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f),
     )
 }
 
@@ -188,7 +190,7 @@ fun StatusBadge(
     color: Color? = null,
 ) {
     val tone = color ?: when {
-        active -> MaterialTheme.colorScheme.primary
+        active -> LocalDaeGlassPalette.current.success
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     Row(
@@ -206,19 +208,16 @@ fun StatusBadge(
 }
 
 @Composable
-fun LatencyBadge(millis: Int?, error: String? = null, tag: String? = null) {
+fun LatencyBadge(millis: Int?, error: String? = null) {
+    val palette = LocalDaeGlassPalette.current
     val (text, color) = when {
-        millis != null && millis < 100 -> "$millis ms" to MaterialTheme.colorScheme.primary
-        millis != null && millis < 250 -> "$millis ms" to MaterialTheme.colorScheme.tertiary
+        millis != null && millis < 100 -> "$millis ms" to palette.success
+        millis != null && millis < 250 -> "$millis ms" to palette.warning
         millis != null -> "$millis ms" to MaterialTheme.colorScheme.error
         error != null -> "不可用" to MaterialTheme.colorScheme.outline
         else -> "未测试" to MaterialTheme.colorScheme.onSurfaceVariant
     }
-    Text(
-        if (tag == null) text else "$tag · $text",
-        style = MaterialTheme.typography.labelMedium,
-        color = color,
-    )
+    Text(text, style = MaterialTheme.typography.labelMedium, color = color)
 }
 
 @Composable
@@ -236,10 +235,11 @@ fun TrafficBar(traffic: TrafficInfo) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        val palette = LocalDaeGlassPalette.current
         val tone = when {
             traffic.usageFraction > 0.9f -> MaterialTheme.colorScheme.error
-            traffic.usageFraction > 0.7f -> MaterialTheme.colorScheme.tertiary
-            else -> MaterialTheme.colorScheme.primary
+            traffic.usageFraction > 0.7f -> palette.warning
+            else -> palette.success
         }
         Box(
             modifier = Modifier

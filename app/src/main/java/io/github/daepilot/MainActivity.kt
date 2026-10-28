@@ -101,7 +101,10 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val snapshot by viewModel.snapshot.collectAsStateWithLifecycle()
-            DaePilotTheme(themeMode = snapshot.settings.themeMode) {
+            DaePilotTheme(
+                themeMode = snapshot.settings.themeMode,
+                accentColor = snapshot.settings.accentColor,
+            ) {
                 DaePilotRoot(viewModel)
             }
         }
@@ -264,19 +267,19 @@ private fun DaeBottomBar(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalDaeGlassPalette.current
-    val shape = RoundedCornerShape(30.dp)
+    val shape = RoundedCornerShape(28.dp)
     val style = HazeStyle(
         backgroundColor = MaterialTheme.colorScheme.surface,
         tints = listOf(HazeTint(palette.dockTint)),
-        blurRadius = 26.dp,
-        noiseFactor = 0.06f,
+        blurRadius = 24.dp,
+        noiseFactor = 0.04f,
         fallbackTint = HazeTint(palette.fallbackTint),
     )
     Row(
         modifier = modifier
             .fillMaxWidth()
             .shadow(
-                elevation = 22.dp,
+                elevation = 16.dp,
                 shape = shape,
                 clip = false,
                 ambientColor = palette.shadow,
@@ -285,12 +288,12 @@ private fun DaeBottomBar(
             .clip(shape)
             .hazeChild(hazeState, style)
             .border(
-                1.dp,
+                0.75.dp,
                 Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)),
                 shape,
             )
             .padding(horizontal = 6.dp, vertical = 6.dp)
-            .height(60.dp),
+            .height(58.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         tabs.forEach { tab ->
@@ -311,7 +314,7 @@ private fun RowScope.DockItem(
 ) {
     val background by animateColorAsState(
         targetValue = if (selected) {
-            MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
         } else {
             Color.Transparent
         },

@@ -39,6 +39,7 @@ import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -72,7 +73,6 @@ import io.github.daepilot.ui.components.GlassIconButton
 import io.github.daepilot.ui.components.GlassSurface
 import io.github.daepilot.ui.components.ScreenBottom
 import io.github.daepilot.ui.components.ScreenEdge
-import io.github.daepilot.ui.components.WingMark
 import io.github.daepilot.ui.theme.LocalDaeGlassPalette
 
 @Composable
@@ -192,26 +192,10 @@ private fun HomeHeader(
             .padding(top = 8.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        val tileShape = RoundedCornerShape(14.dp)
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(tileShape)
-                .background(
-                    Brush.linearGradient(
-                        listOf(Color(0xFF1D2B23), Color(0xFF101612)),
-                    ),
-                )
-                .border(1.dp, Color.White.copy(alpha = 0.16f), tileShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            WingMark(modifier = Modifier.size(28.dp))
-        }
-        Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text("DaePilot", style = MaterialTheme.typography.titleLarge)
             Text(
-                "v${BuildConfig.VERSION_NAME.substringBefore("-debug")} · dae $daeVersion",
+                "${BuildConfig.VERSION_NAME.substringBefore("-debug")} · dae $daeVersion",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -266,9 +250,10 @@ private fun HeroCard(
         setup -> "待设置"
         else -> "待机"
     }
+    val palette = LocalDaeGlassPalette.current
     val tone = when {
-        running -> MaterialTheme.colorScheme.primary
-        setup -> MaterialTheme.colorScheme.tertiary
+        running -> palette.success
+        setup -> palette.warning
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
@@ -292,7 +277,7 @@ private fun HeroCard(
             )
             Spacer(Modifier.weight(1f))
             Text(
-                if (running) "TProxy" else "LOCAL",
+                if (running) "TProxy" else "本机",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -337,7 +322,7 @@ private fun HeroCard(
             Spacer(Modifier.width(14.dp))
             PowerOrb(
                 running = running,
-                setup = setup,
+                compact = setup,
                 busy = busy,
                 onToggle = onToggle,
             )
@@ -351,26 +336,31 @@ private fun SetupPill(
     loading: Boolean,
     onClick: () -> Unit,
 ) {
+    val dark = LocalDaeGlassPalette.current.isDark
     Surface(
         onClick = onClick,
         enabled = !loading,
         shape = CircleShape,
-        color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.16f),
-        contentColor = MaterialTheme.colorScheme.tertiary,
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp,
-            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.30f),
-        ),
+        color = if (dark) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.primary
+        },
+        contentColor = if (dark) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            MaterialTheme.colorScheme.onPrimary
+        },
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 13.dp, vertical = 7.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (loading) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(13.dp),
                     strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.tertiary,
+                    color = LocalContentColor.current,
                 )
             } else {
                 Text(label, style = MaterialTheme.typography.labelLarge)
@@ -382,7 +372,7 @@ private fun SetupPill(
 @Composable
 private fun PowerOrb(
     running: Boolean,
-    setup: Boolean,
+    compact: Boolean,
     busy: Boolean,
     onToggle: () -> Unit,
 ) {
@@ -404,7 +394,10 @@ private fun PowerOrb(
         animationSpec = spring(dampingRatio = 0.62f, stiffness = 780f),
         label = "powerScale",
     )
-    val glowAlpha = if (running) 0.24f + 0.16f * breath else 0.06f
+    val glowAlpha = if (running) 0.24f + 0.16f * breath else 0f
+    val outerSize = if (compact) 68.dp else 88.dp
+    val innerSize = if (compact) 54.dp else 64.dp
+    val iconSize = if (compact) 22.dp else 26.dp
     val fill = if (running) {
         Brush.linearGradient(
             listOf(
@@ -420,23 +413,23 @@ private fun PowerOrb(
             ),
         )
     }
-    val contentColor = when {
-        running -> MaterialTheme.colorScheme.onPrimary
-        setup -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.onSurface
+    val contentColor = if (running) {
+        MaterialTheme.colorScheme.onPrimary
+    } else {
+        MaterialTheme.colorScheme.onSurface
     }
-    val edgeColor = when {
-        running -> Color.Transparent
-        setup -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.50f)
-        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+    val edgeColor = if (running) {
+        Color.Transparent
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.40f)
     }
     Box(
-        modifier = Modifier.size(88.dp),
+        modifier = Modifier.size(outerSize),
         contentAlignment = Alignment.Center,
     ) {
         Box(
             modifier = Modifier
-                .size(88.dp)
+                .size(outerSize)
                 .background(
                     Brush.radialGradient(
                         listOf(palette.glow.copy(alpha = glowAlpha), Color.Transparent),
@@ -446,13 +439,13 @@ private fun PowerOrb(
         )
         Box(
             modifier = Modifier
-                .size(64.dp)
+                .size(innerSize)
                 .graphicsLayer {
                     scaleX = scale
                     scaleY = scale
                 }
                 .shadow(
-                    elevation = 16.dp,
+                    elevation = if (compact) 8.dp else 16.dp,
                     shape = CircleShape,
                     clip = false,
                     ambientColor = palette.glow,
@@ -478,7 +471,7 @@ private fun PowerOrb(
             }
             if (busy) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(22.dp),
+                    modifier = Modifier.size(if (compact) 18.dp else 22.dp),
                     strokeWidth = 2.dp,
                     color = contentColor,
                 )
@@ -487,7 +480,7 @@ private fun PowerOrb(
                     Icons.Rounded.PowerSettingsNew,
                     contentDescription = if (running) "停止代理" else "启动代理",
                     tint = contentColor,
-                    modifier = Modifier.size(26.dp),
+                    modifier = Modifier.size(iconSize),
                 )
             }
         }
@@ -512,7 +505,7 @@ private fun SignalCard(status: DaemonStatus, bootRequested: Boolean) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             SignalCell(
-                label = "ROOT",
+                label = "权限",
                 value = if (rootReady) "正常" else "未授权",
                 active = rootReady,
                 modifier = Modifier.weight(1f),
@@ -559,7 +552,7 @@ private fun SignalCell(
                     .clip(CircleShape)
                     .background(
                         if (active) {
-                            MaterialTheme.colorScheme.primary
+                            LocalDaeGlassPalette.current.success
                         } else {
                             MaterialTheme.colorScheme.outline
                         },
@@ -601,13 +594,13 @@ private fun NodeCard(selectedNode: Node?, onOpenNodes: () -> Unit) {
                 modifier = Modifier
                     .size(40.dp)
                     .clip(RoundedCornerShape(13.dp))
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.80f)),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     Icons.Outlined.Public,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp),
                 )
             }
@@ -636,13 +629,19 @@ private fun NodeCard(selectedNode: Node?, onOpenNodes: () -> Unit) {
             }
             if (selectedNode?.latencyMs != null) {
                 Spacer(Modifier.width(8.dp))
+                val latency = selectedNode.latencyMs
+                val tone = when {
+                    latency < 100 -> LocalDaeGlassPalette.current.success
+                    latency < 250 -> LocalDaeGlassPalette.current.warning
+                    else -> MaterialTheme.colorScheme.error
+                }
                 Surface(
                     shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                    contentColor = MaterialTheme.colorScheme.primary,
+                    color = tone.copy(alpha = 0.12f),
+                    contentColor = tone,
                 ) {
                     Text(
-                        "${selectedNode.latencyMs} ms",
+                        "$latency ms",
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
                     )
@@ -671,13 +670,13 @@ private fun TrafficCard(traffic: TrafficInfo?, onOpenSubscriptions: () -> Unit) 
                 modifier = Modifier
                     .size(40.dp)
                     .clip(RoundedCornerShape(13.dp))
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.80f)),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     Icons.Outlined.DataUsage,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp),
                 )
             }
@@ -716,8 +715,8 @@ private fun TrafficCard(traffic: TrafficInfo?, onOpenSubscriptions: () -> Unit) 
         if (traffic != null) {
             val tone = when {
                 traffic.usageFraction > 0.9f -> MaterialTheme.colorScheme.error
-                traffic.usageFraction > 0.7f -> MaterialTheme.colorScheme.tertiary
-                else -> MaterialTheme.colorScheme.primary
+                traffic.usageFraction > 0.7f -> LocalDaeGlassPalette.current.warning
+                else -> LocalDaeGlassPalette.current.success
             }
             Box(
                 modifier = Modifier

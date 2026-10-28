@@ -63,6 +63,7 @@ import io.github.daepilot.ui.components.GlassSearchField
 import io.github.daepilot.ui.components.GlassSurface
 import io.github.daepilot.ui.components.ScreenEdge
 import io.github.daepilot.ui.components.ScreenHeader
+import io.github.daepilot.ui.theme.LocalDaeGlassPalette
 
 private val levelOptions = listOf(
     null to "全部",
@@ -349,7 +350,7 @@ private fun UploadBanner(
 private fun LogRow(line: LogLine) {
     val color = when (line.level) {
         "error" -> MaterialTheme.colorScheme.error
-        "warn" -> MaterialTheme.colorScheme.tertiary
+        "warn" -> LocalDaeGlassPalette.current.warning
         "debug" -> MaterialTheme.colorScheme.onSurfaceVariant
         else -> MaterialTheme.colorScheme.onSurface
     }

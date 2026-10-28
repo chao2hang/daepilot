@@ -215,6 +215,7 @@ data class AppSettings(
     val subscriptionAutoUpdate: Boolean = true,
     val allowMeteredUpdates: Boolean = true,
     val themeMode: String = "system",
+    val accentColor: String = "forest",
     val dayNightLogLimit: Int = 2000,
 )
 

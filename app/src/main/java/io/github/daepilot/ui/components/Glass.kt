@@ -56,62 +56,43 @@ fun AmbientBackground(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalDaeGlassPalette.current
-    val coolTarget = if (mode == AmbientMode.Idle) palette.ambientNeutral else palette.ambientCool
-    val deepTarget = if (mode == AmbientMode.Setup) palette.ambientWarm else palette.ambientDeep
-    val cool by animateColorAsState(coolTarget, tween(900), label = "ambientCool")
-    val deep by animateColorAsState(deepTarget, tween(900), label = "ambientDeep")
-    val coolAlpha = when (mode) {
-        AmbientMode.Running -> 0.62f
-        AmbientMode.Setup -> 0.34f
-        AmbientMode.Idle -> 0.26f
-    } * if (palette.isDark) 0.82f else 1f
-    val deepAlpha = when (mode) {
-        AmbientMode.Running -> 0.46f
-        AmbientMode.Setup -> 0.52f
-        AmbientMode.Idle -> 0.30f
-    } * if (palette.isDark) 0.9f else 1f
-    val warmAlpha = when (mode) {
-        AmbientMode.Setup -> 0.46f
-        AmbientMode.Running -> 0.26f
-        else -> 0.10f
-    } * if (palette.isDark) 0.8f else 1f
+    val cool by animateColorAsState(palette.ambientCool, tween(900), label = "ambientCool")
+    val deep by animateColorAsState(palette.ambientDeep, tween(900), label = "ambientDeep")
+    val intensity = when (mode) {
+        AmbientMode.Running -> 1f
+        AmbientMode.Setup -> 0.8f
+        AmbientMode.Idle -> 0.45f
+    }
+    val coolAlpha = (if (palette.isDark) 0.17f else 0.075f) * intensity
+    val deepAlpha = (if (palette.isDark) 0.12f else 0.055f) * intensity
 
     Canvas(modifier.fillMaxSize()) {
         drawRect(Brush.verticalGradient(listOf(palette.baseTop, palette.baseBottom)))
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(cool.copy(alpha = coolAlpha), Color.Transparent),
-                center = Offset(size.width * 0.92f, size.height * 0.06f),
-                radius = size.width * 0.95f,
+                center = Offset(size.width * 0.88f, size.height * 0.02f),
+                radius = size.width * 1.05f,
             ),
-            radius = size.width * 0.95f,
-            center = Offset(size.width * 0.92f, size.height * 0.06f),
+            radius = size.width * 1.05f,
+            center = Offset(size.width * 0.88f, size.height * 0.02f),
         )
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(deep.copy(alpha = deepAlpha), Color.Transparent),
-                center = Offset(size.width * 0.02f, size.height * 0.44f),
-                radius = size.width * 0.92f,
+                center = Offset(size.width * 0.05f, size.height * 0.55f),
+                radius = size.width * 0.85f,
             ),
-            radius = size.width * 0.92f,
-            center = Offset(size.width * 0.02f, size.height * 0.44f),
-        )
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(palette.ambientWarm.copy(alpha = warmAlpha), Color.Transparent),
-                center = Offset(size.width * 0.76f, size.height * 0.94f),
-                radius = size.width * 0.82f,
-            ),
-            radius = size.width * 0.82f,
-            center = Offset(size.width * 0.76f, size.height * 0.94f),
+            radius = size.width * 0.85f,
+            center = Offset(size.width * 0.05f, size.height * 0.55f),
         )
         drawRect(
             Brush.verticalGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = if (palette.isDark) 0.05f else 0.24f),
+                    Color.White.copy(alpha = if (palette.isDark) 0.035f else 0.10f),
                     Color.Transparent,
                 ),
-                endY = size.height * 0.34f,
+                endY = size.height * 0.30f,
             ),
         )
     }
@@ -122,10 +103,10 @@ fun AmbientBackground(
 @Composable
 fun GlassSurface(
     modifier: Modifier = Modifier,
-    shape: Shape = RoundedCornerShape(24.dp),
+    shape: Shape = RoundedCornerShape(22.dp),
     contentPadding: PaddingValues = PaddingValues(18.dp),
     spacing: Dp = 12.dp,
-    elevation: Dp = 14.dp,
+    elevation: Dp = 10.dp,
     tone: Color? = null,
     onClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
@@ -142,13 +123,13 @@ fun GlassSurface(
         .clip(shape)
         .background(Brush.verticalGradient(listOf(palette.glassTop, palette.glassBottom)))
     val tinted = if (tone != null) {
-        base.background(tone.copy(alpha = 0.10f))
+        base.background(tone.copy(alpha = 0.08f))
     } else {
         base
     }
     Column(
         modifier = tinted
-            .border(1.dp, Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)), shape)
+            .border(0.75.dp, Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)), shape)
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(spacing),
@@ -179,10 +160,10 @@ fun GlassIconButton(
     val palette = LocalDaeGlassPalette.current
     Box(
         modifier = modifier
-            .size(38.dp)
+            .size(40.dp)
             .clip(CircleShape)
             .background(Brush.verticalGradient(listOf(palette.glassTop, palette.glassBottom)))
-            .border(1.dp, Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)), CircleShape)
+            .border(0.75.dp, Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)), CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -203,26 +184,33 @@ fun GlassAction(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    val palette = LocalDaeGlassPalette.current
+    val container = if (LocalDaeGlassPalette.current.isDark) {
+        MaterialTheme.colorScheme.surfaceContainerHigh
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
     Surface(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.alpha(if (enabled) 1f else 0.45f),
-        shape = RoundedCornerShape(18.dp),
-        color = palette.glassTop.copy(alpha = if (palette.isDark) 0.55f else 0.66f),
+        modifier = modifier.alpha(if (enabled) 1f else 0.55f),
+        shape = RoundedCornerShape(16.dp),
+        color = container.copy(alpha = 0.90f),
         contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(1.dp, palette.borderTop.copy(alpha = 0.42f)),
+        border = BorderStroke(
+            0.75.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f),
+        ),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 11.dp),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 icon,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(17.dp),
             )
             Spacer(Modifier.width(6.dp))
             Text(
