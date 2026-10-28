@@ -146,7 +146,7 @@ fun NodesScreen(
 
         if (snapshot.nodes.any { it.protocol.isUdpOnly }) {
             Text(
-                "QUIC 节点使用 ICMP 测延迟",
+                "QUIC 节点按其服务端口测握手延迟，不再依赖 ping",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = ScreenEdge, end = ScreenEdge, bottom = 6.dp),
@@ -328,7 +328,6 @@ private fun NodeRow(
             LatencyBadge(
                 millis = node.latencyMs,
                 error = if (node.latencyMs == null && node.lastTestedAt > 0) "不可用" else null,
-                tag = if (node.protocol.isUdpOnly) "ICMP" else null,
             )
             Box {
                 IconButton(onClick = { menuOpen = true }) {

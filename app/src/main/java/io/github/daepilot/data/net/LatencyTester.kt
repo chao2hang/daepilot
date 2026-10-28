@@ -10,6 +10,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.TimeUnit
@@ -24,14 +26,16 @@ data class LatencyResult(
 )
 
 /**
- * TCP handshake for stream protocols, ICMP echo for QUIC-only nodes (hysteria2,
- * TUIC). A TCP connect cannot reach a QUIC server and previously made those
- * nodes untestable. ICMP measures reachability/RTT, not the proxy handshake, so
- * the UI labels those results explicitly.
+ * Handshake round-trip to the node's own service port: TCP connect for stream
+ * protocols, QUIC Version Negotiation for QUIC-only nodes (hysteria2, TUIC).
+ * ICMP remains only as a fallback, because it measures the host rather than the
+ * listener and many nodes drop it.
  */
 class LatencyTester(
     private val timeoutMs: Int = 2500,
     private val parallelism: Int = 8,
+    private val quicSamples: Int = 3,
+    private val quicTimeoutMs: Int = 1200,
 ) {
     suspend fun test(nodes: List<Node>): List<LatencyResult> = coroutineScope {
         val semaphore = Semaphore(parallelism.coerceAtLeast(1))
@@ -45,26 +49,77 @@ class LatencyTester(
     suspend fun probe(node: Node): LatencyResult = withContext(Dispatchers.IO) {
         val endpoint: ShareEndpoint = ShareEndpoint.parse(node.link)
             ?: return@withContext LatencyResult(node.id, null, "无法解析服务器地址")
-        if (node.protocol.isUdpOnly) {
-            return@withContext probeIcmp(node.id, endpoint.host)
-        }
         val port = endpoint.port
             ?: return@withContext LatencyResult(node.id, null, "缺少端口")
+        if (node.protocol.isUdpOnly) {
+            probeQuic(node.id, endpoint.host, port)
+        } else {
+            probeTcp(node.id, endpoint.host, port)
+        }
+    }
+
+    private fun probeTcp(nodeId: String, host: String, port: Int): LatencyResult {
         var failure: String? = null
         val elapsedMs = try {
             measureNanoTime {
                 Socket().use { socket ->
-                    socket.connect(InetSocketAddress(endpoint.host, port), timeoutMs)
+                    socket.connect(InetSocketAddress(host, port), timeoutMs)
                 }
             } / 1_000_000L
         } catch (e: Exception) {
             failure = e.message ?: e.javaClass.simpleName
             -1L
         }
-        if (failure != null) {
-            LatencyResult(node.id, null, failure)
+        return if (failure != null) {
+            LatencyResult(nodeId, null, failure)
         } else {
-            LatencyResult(node.id, elapsedMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            LatencyResult(nodeId, elapsedMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+        }
+    }
+
+    private fun probeQuic(nodeId: String, host: String, port: Int): LatencyResult {
+        // UDP loses packets routinely, so one reply is enough but several are
+        // sampled: the fastest is the honest estimate of the path.
+        var best: Int? = null
+        var failure: String? = null
+        repeat(quicSamples.coerceAtLeast(1)) {
+            val sample = runCatching { sampleQuicRtt(host, port) }
+            val millis = sample.getOrNull()
+            if (millis != null) {
+                best = minOf(best ?: millis, millis)
+            } else {
+                failure = sample.exceptionOrNull()?.message
+            }
+        }
+        val rtt = best
+        if (rtt != null) return LatencyResult(nodeId, rtt, method = "quic")
+        val icmp = probeIcmp(nodeId, host)
+        if (icmp.latencyMs != null) return icmp
+        return icmp.copy(error = "QUIC 端口探测失败（${failure ?: "无握手应答"}），ICMP 备用也无响应")
+    }
+
+    /**
+     * A long-header packet naming a version no implementation supports must be
+     * answered with a Version Negotiation packet (RFC 9000 6.4.2, 17.3), and a
+     * server may only do so when the destination connection id is at least 8
+     * bytes, which keeps the probe from being used to amplify. The answer comes
+     * from the same listener and UDP path the tunnel uses, so its round trip is
+     * the node's real latency even when the host filters ICMP.
+     */
+    private fun sampleQuicRtt(host: String, port: Int): Int {
+        val request = QUIC_PROBE_PACKET
+        return DatagramSocket().use { socket ->
+            socket.connect(InetSocketAddress(host, port))
+            socket.soTimeout = quicTimeoutMs
+            val reply = DatagramPacket(ByteArray(request.size), request.size)
+            val elapsed = measureNanoTime {
+                socket.send(DatagramPacket(request, request.size))
+                socket.receive(reply)
+            } / 1_000_000L
+            if (!isVersionNegotiation(reply.data, reply.length)) {
+                error("服务器未按 QUIC 协议应答")
+            }
+            elapsed.toInt().coerceAtLeast(0)
         }
     }
 
@@ -111,6 +166,17 @@ class LatencyTester(
     }
 
     companion object {
+        private const val PROBE_PACKET_SIZE = 1232
+        private val PROBE_VERSION = byteArrayOf(0x0a, 0x0a, 0x0a, 0x0a)
+        private val PROBE_DESTINATION_CONNECTION_ID = ByteArray(20) { 0xAB.toByte() }
+        private val PROBE_SOURCE_CONNECTION_ID = ByteArray(20) { 0xCD.toByte() }
+        internal val QUIC_PROBE_PACKET: ByteArray = run {
+            val ids = PROBE_DESTINATION_CONNECTION_ID.size.toByte()
+            val header = byteArrayOf(0xC0.toByte()) + PROBE_VERSION +
+                ids + PROBE_DESTINATION_CONNECTION_ID + ids + PROBE_SOURCE_CONNECTION_ID
+            header + ByteArray(PROBE_PACKET_SIZE - header.size)
+        }
+
         private val pingTime = Regex("""time[=<]\s*([0-9.]+)\s*ms""", RegexOption.IGNORE_CASE)
 
         fun parsePingMillis(output: String): Int? =
@@ -118,5 +184,12 @@ class LatencyTester(
                 ?.toDoubleOrNull()
                 ?.roundToInt()
                 ?.coerceAtLeast(0)
+
+        /** Long header (top bit set) plus the reserved zero version field. */
+        fun isVersionNegotiation(data: ByteArray, length: Int): Boolean =
+            length >= 7 &&
+                data[0].toInt() and 0x80 != 0 &&
+                data[1] == 0.toByte() && data[2] == 0.toByte() &&
+                data[3] == 0.toByte() && data[4] == 0.toByte()
     }
 }

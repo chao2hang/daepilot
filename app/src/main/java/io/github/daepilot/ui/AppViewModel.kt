@@ -327,7 +327,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val icmp = results.count { it.method == "icmp" && it.latencyMs != null }
             notify(
                 "延迟测试完成：$ok/${results.size} 可用" +
-                    if (icmp > 0) "，其中 $icmp 个 QUIC 节点使用 ICMP" else "",
+                    if (icmp > 0) "，其中 $icmp 个 QUIC 节点退回 ping 备用" else "",
             )
         }
     }
@@ -337,8 +337,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         notify(
             when {
                 result?.latencyMs != null && result.method == "icmp" ->
-                    "ICMP 延迟 ${result.latencyMs} ms（QUIC 节点）"
-                result?.latencyMs != null -> "延迟 ${result.latencyMs} ms"
+                    "延迟 ${result.latencyMs} ms（QUIC 端口无响应，退回 ping）"
+                result?.latencyMs != null -> "握手延迟 ${result.latencyMs} ms"
                 result?.error != null -> result.error
                 else -> "测试失败"
             },
