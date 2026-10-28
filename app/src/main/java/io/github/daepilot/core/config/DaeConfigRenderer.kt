@@ -21,6 +21,7 @@ import java.security.MessageDigest
  */
 object DaeConfigRenderer {
     private const val MAX_IDENTIFIER_LENGTH = 128
+    private const val MAX_PROCESS_NAME_LENGTH = 15
     private val RESERVED = setOf("direct", "must_direct", "block")
 
     fun render(spec: RenderSpec): String = buildString(2048 + spec.nodes.size * 96) {
@@ -93,7 +94,10 @@ object DaeConfigRenderer {
         append("  tcp_check_url: 'http://cp.cloudflare.com,1.1.1.1,2606:4700:4700::1111'\n")
         // Keep health checks on IP literals: hostname checks need the same
         // bootstrap resolver as node domains, which can deadlock on Android.
-        append("  udp_check_dns: '8.8.8.8,2001:4860:4860::8888'\n")
+        // dae parses these as addresses, so the port is mandatory: without it the
+        // connectivity check is silently dropped ("missing port in address") and
+        // a dead node is never marked unhealthy.
+        append("  udp_check_dns: '8.8.8.8:53,[2001:4860:4860::8888]:53'\n")
         append("  check_interval: 30s\n")
         append("  check_tolerance: 50ms\n")
         append("  sniffing_timeout: 30ms\n")
@@ -241,15 +245,18 @@ object DaeConfigRenderer {
 
         // Android connectivity probes are owned by the system and should not be
         // proxied; a failed probe makes the OS report "no internet".
-        append("  pname(netd, com.android.networkstack.process) -> must_direct\n")
+        append("  pname(")
+            .append(pnamePattern(listOf("netd", "com.android.networkstack.process")))
+            .append(") -> must_direct\n")
 
         if (spec.bypassPackages.isNotEmpty()) {
-            val packages = spec.bypassPackages
-                .map { it.trim() }
-                .filter { it.matches(Regex("[A-Za-z0-9_.:]+")) }
-                .distinct()
+            val packages = pnamePattern(
+                spec.bypassPackages
+                    .map { it.trim() }
+                    .filter { it.matches(Regex("[A-Za-z0-9_.:]+")) },
+            )
             if (packages.isNotEmpty()) {
-                append("  pname(").append(packages.joinToString(", ")).append(") -> must_direct\n")
+                append("  pname(").append(packages).append(") -> must_direct\n")
             }
         }
 
@@ -295,6 +302,18 @@ object DaeConfigRenderer {
         }
         return seen.toList()
     }
+
+    /**
+     * Android sets a task's comm to the LAST 15 characters of the process name,
+     * while dae trims an over-long `pname` pattern from the front — so a full
+     * package name such as `com.android.networkstack.process` (which dae shortens
+     * to `com.android.netw`) can never match `rkstack.process`. Compare tails.
+     */
+    fun pnamePattern(names: List<String>): String =
+        names.map { it.trim().takeLast(MAX_PROCESS_NAME_LENGTH) }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .joinToString(", ")
 
     /** dae keys allow ASCII letters/digits; everything else folds to `_`. */
     fun sanitizeIdentifier(raw: String): String {

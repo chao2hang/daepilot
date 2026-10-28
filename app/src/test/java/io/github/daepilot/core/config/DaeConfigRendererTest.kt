@@ -125,6 +125,12 @@ class DaeConfigRendererTest {
     }
 
     @Test
+    fun udpCheckDnsCarriesPortsSoTheHealthCheckSurvivesParsing() {
+        val config = render(RenderSpec(nodes = listOf(hk)))
+        assertTrue(config.contains("udp_check_dns: '8.8.8.8:53,[2001:4860:4860::8888]:53'"))
+    }
+
+    @Test
     fun bypassPackageListIsSanitized() {
         val config = render(
             RenderSpec(
@@ -134,6 +140,20 @@ class DaeConfigRendererTest {
         )
         assertTrue(config.contains("pname(com.example.app) -> must_direct"))
         assertFalse(config.contains("bad name"))
+    }
+
+    @Test
+    fun pnameRulesMatchTheKernelTaskNameNotThePackageName() {
+        val config = render(
+            RenderSpec(
+                nodes = listOf(hk),
+                bypassPackages = listOf("com.tencent.mm", "com.android.chrome"),
+            ),
+        )
+        // Android names a task with the last 15 characters of its process name.
+        assertTrue(config.contains("pname(netd, rkstack.process) -> must_direct"))
+        assertFalse(config.contains("com.android.networkstack.process"))
+        assertTrue(config.contains("pname(com.tencent.mm, .android.chrome) -> must_direct"))
     }
 
     @Test
