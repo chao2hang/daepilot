@@ -652,6 +652,53 @@ assert_contains "$BASE/rootfs/config/config.dae" "qtype(AAAA) && !qname(geosite:
   "IPv4-only proxy blocks foreign AAAA lookups"
 FAKE_MOBILE=""
 
+# 17b. A domestic DoH upstream does not use port 53, so the cellular rewrite
+#      must leave CN names on it instead of forcing the foreign DoH.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_MOBILE=1
+FAKE_DUMPSYS=1
+cat > "$BASE/staging/config.dae" <<'EOF'
+global {
+  wan_interface: auto
+}
+dns {
+  upstream {
+    alidns: 'https://223.5.5.5/dns-query'
+    googledns: 'https://1.1.1.1/dns-query'
+  }
+  routing {
+    request {
+      qtype(AAAA) && !qname(geosite:cn) -> reject
+      qname(geosite:cn) -> alidns
+      fallback: googledns
+    }
+  }
+}
+node {
+  a: 'trojan://pw@a.example:443#a'
+}
+group {
+  proxy {
+    filter: name('a')
+    policy: fixed(0)
+  }
+}
+routing {
+  fallback: proxy
+}
+EOF
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with domestic DoH on cellular succeeds"
+assert_contains "$BASE/rootfs/config/config.dae" "qname(geosite:cn) -> alidns" \
+  "domestic DoH keeps CN names on the domestic resolver"
+assert_contains "$BASE/rootfs/config/config.dae" "alidns: 'https://223.5.5.5/dns-query'" \
+  "domestic DoH upstream is preserved on cellular"
+assert_not_contains "$BASE/rootfs/config/config.dae" "qname(geosite:cn) -> googledns" \
+  "domestic DoH is not rewritten to the foreign resolver"
+FAKE_MOBILE=""
+FAKE_DUMPSYS=""
+
 setup_base "$CTL_SRC"
 CTL_UNDER_TEST="$BASE/bin/daepilotctl"
 FAKE_DUMPSYS=1

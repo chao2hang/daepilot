@@ -418,6 +418,10 @@ apply_cellular_dns_mode() {
   case "$wan" in rmnet*) ;; *) return 0 ;; esac
   grep -q 'googledns:' "$file" 2>/dev/null || return 0
   [ -n "$(proxy_node_hosts "$file" 2>/dev/null)" ] || return 0
+  # A domestic DoH upstream (HTTPS/TLS) does not use port 53, so the
+  # rmnet self-capture workaround is unnecessary. Keep CN names on it
+  # instead of forcing them through the slower foreign DoH.
+  grep -qE "alidns: '(https|tls)://" "$file" 2>/dev/null && return 0
   tmp="$file.cdns.$$"
   if sed 's/^\([[:space:]]*qname(geosite:cn)[[:space:]]*->[[:space:]]*\)alidns[[:space:]]*$/\1googledns/' \
       "$file" > "$tmp" 2>/dev/null; then

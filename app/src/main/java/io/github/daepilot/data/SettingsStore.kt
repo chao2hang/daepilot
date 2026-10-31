@@ -57,10 +57,22 @@ class SettingsStore(private val context: Context) {
      */
     suspend fun migrateLegacyDns() {
         update { config ->
-            if (config.dns.foreignUpstream == DnsConfig.LEGACY_FOREIGN_UPSTREAM) {
-                config.copy(
-                    dns = config.dns.copy(foreignUpstream = DnsConfig.DEFAULT_FOREIGN_UPSTREAM),
-                )
+            val domestic = if (
+                config.dns.domesticUpstream == DnsConfig.LEGACY_DOMESTIC_UPSTREAM
+            ) {
+                DnsConfig.DEFAULT_DOMESTIC_UPSTREAM
+            } else {
+                config.dns.domesticUpstream
+            }
+            val foreign = if (
+                config.dns.foreignUpstream == DnsConfig.LEGACY_FOREIGN_UPSTREAM
+            ) {
+                DnsConfig.DEFAULT_FOREIGN_UPSTREAM
+            } else {
+                config.dns.foreignUpstream
+            }
+            if (domestic != config.dns.domesticUpstream || foreign != config.dns.foreignUpstream) {
+                config.copy(dns = config.dns.copy(domesticUpstream = domestic, foreignUpstream = foreign))
             } else {
                 config
             }

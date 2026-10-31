@@ -129,7 +129,10 @@ data class DnsConfig(
     // Android's dae build resolves hostname upstreams through the bootstrap
     // resolver it also needs for node domains. IP literals keep DNS working
     // even when that bootstrap lookup is degraded on cellular networks.
-    val domesticUpstream: String = "udp://119.29.29.29:53",
+    // A domestic DoH endpoint avoids carrier DNS pollution and the rmnet
+    // port-53 self-capture problem without sending CN lookups through the
+    // foreign node. The IP literal keeps bootstrap out of the path.
+    val domesticUpstream: String = DEFAULT_DOMESTIC_UPSTREAM,
     // Plain UDP/TCP 53 to public resolvers is polluted on many mainland
     // carriers and often dropped by the node. DoH over the proxy is the
     // reliable path for foreign names.
@@ -137,6 +140,8 @@ data class DnsConfig(
     val useDomesticForCn: Boolean = true,
 ) {
     companion object {
+        const val DEFAULT_DOMESTIC_UPSTREAM = "https://223.5.5.5/dns-query"
+        const val LEGACY_DOMESTIC_UPSTREAM = "udp://119.29.29.29:53"
         const val DEFAULT_FOREIGN_UPSTREAM = "https://1.1.1.1/dns-query"
         const val LEGACY_FOREIGN_UPSTREAM = "tcp+udp://8.8.8.8:53"
     }
