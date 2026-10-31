@@ -130,9 +130,17 @@ data class DnsConfig(
     // resolver it also needs for node domains. IP literals keep DNS working
     // even when that bootstrap lookup is degraded on cellular networks.
     val domesticUpstream: String = "udp://119.29.29.29:53",
-    val foreignUpstream: String = "tcp+udp://8.8.8.8:53",
+    // Plain UDP/TCP 53 to public resolvers is polluted on many mainland
+    // carriers and often dropped by the node. DoH over the proxy is the
+    // reliable path for foreign names.
+    val foreignUpstream: String = DEFAULT_FOREIGN_UPSTREAM,
     val useDomesticForCn: Boolean = true,
-)
+) {
+    companion object {
+        const val DEFAULT_FOREIGN_UPSTREAM = "https://1.1.1.1/dns-query"
+        const val LEGACY_FOREIGN_UPSTREAM = "tcp+udp://8.8.8.8:53"
+    }
+}
 
 /** Everything the renderer needs, independent from Android APIs. */
 @Serializable

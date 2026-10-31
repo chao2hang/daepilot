@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import io.github.daepilot.core.model.DnsConfig
 import io.github.daepilot.core.model.UserConfig
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -47,6 +48,22 @@ class SettingsStore(private val context: Context) {
     suspend fun replace(config: UserConfig) {
         context.configDataStore.edit { prefs ->
             prefs[configKey] = json.encodeToString(UserConfig.serializer(), config)
+        }
+    }
+
+    /**
+     * Plain DNS through the node was the old default and is polluted on many
+     * carriers. Migrate only that exact default; custom upstreams are kept.
+     */
+    suspend fun migrateLegacyDns() {
+        update { config ->
+            if (config.dns.foreignUpstream == DnsConfig.LEGACY_FOREIGN_UPSTREAM) {
+                config.copy(
+                    dns = config.dns.copy(foreignUpstream = DnsConfig.DEFAULT_FOREIGN_UPSTREAM),
+                )
+            } else {
+                config
+            }
         }
     }
 }

@@ -135,9 +135,9 @@ private fun NetworkContextCard(status: DaemonStatus) {
     val text = when {
         status.running -> "代理已启用 · ${status.node ?: "节点未知"}"
         status.mode == "no-root" ->
-            "未授权 Root，无法读取代理状态；测试仍会使用系统当前网络"
+            "未授权 Root（不影响测试）；测试使用系统当前网络"
         status.mode == "module-missing" ->
-            "Magisk 模块未安装；测试仍会使用系统当前网络"
+            "Magisk 模块未安装；测试使用系统当前网络"
         else -> "代理未启用；本次测试会直连"
     }
     GlassSurface(

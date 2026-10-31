@@ -1,9 +1,6 @@
 package io.github.daepilot.core.network
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -67,11 +64,13 @@ class DomainTester(
 ) {
     suspend fun run(proxyRunning: Boolean, node: String?): DomainTestReport =
         withContext(Dispatchers.IO) {
-            coroutineScope {
-                val exitProbe = async { runCatching { fetchExit() }.getOrNull() }
-                val results = targets.map { target -> async { probe(target) } }.awaitAll()
-                DomainTestReport(results, exitProbe.await(), node, proxyRunning)
-            }
+            // Sequential on purpose: a low-bandwidth or rate-limited node turns
+            // five concurrent TLS handshakes into five timeouts and makes a
+            // healthy proxy look broken. One request at a time measures what a
+            // browser would actually see.
+            val exit = runCatching { fetchExit() }.getOrNull()
+            val results = targets.map { target -> probe(target) }
+            DomainTestReport(results, exit, node, proxyRunning)
         }
 
     internal fun probe(target: DomainTarget): DomainTestResult {

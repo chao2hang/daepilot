@@ -110,6 +110,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         recordEvent("应用启动")
+        viewModelScope.launch {
+            runCatching { repo.migrateLegacyDns() }
+        }
         statusJob = viewModelScope.launch {
             while (isActive) {
                 refreshStatus()

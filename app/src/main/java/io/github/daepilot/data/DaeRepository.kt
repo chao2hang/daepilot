@@ -303,6 +303,8 @@ class DaeRepository(
 
     suspend fun selectNode(id: String?) = settingsStore.update { it.copy(selectedNodeId = id) }
 
+    suspend fun migrateLegacyDns() = settingsStore.migrateLegacyDns()
+
     suspend fun setTemplate(template: RoutingTemplate) =
         settingsStore.update { it.copy(template = template) }
 

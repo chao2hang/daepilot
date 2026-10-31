@@ -54,6 +54,7 @@ Magisk module
 - **DNS 交接**：App 把当前网络的 `LinkProperties.dnsServers` 写入 `run/dns.servers`，`daepilotctl` 再写入 rootfs 的 `/etc/resolv.conf`，供 dae 内 Go resolver 解析节点域名；配置里不再写死 `bootstrap_resolver`。解析器优先使用当前 WAN 的实况 DNS：部分运营商丢弃 `119.29.29.29` 等公共 DNS，只有运营商自己的 DNS 可达，因此内置的国内上游会在落配置时自动替换为当前 WAN 的 DNS。
 - **蜂窝 DNS 回退**：在部分移动网络上，dae 的 DNS 劫持会捕获它自己发往公网 DNS 的查询，导致运营商 DNS 直连超时（原始 UDP 查询正常）。`daepilotctl` 在 WAN 为 `rmnet*` 且存在代理节点时，把 `qname(geosite:cn)` 的解析改走代理的 `googledns`；Wi-Fi 仍使用路由器/运营商 DNS 直连。诊断弹窗会显示当前 WAN、IP、DNS 列表、DNS 模式（直连/国内经代理）、节点与最近错误。
 - **IPv4 节点 AAAA 过滤**：节点没有 IPv6 出口时，Chrome / X 等应用优先使用 AAAA，代理拨号 IPv6 会 `network is unreachable`。存在代理节点时，`daepilotctl` 在 DNS request 中拒绝非国内域名的 AAAA（国内 IPv6 保留），应用自动回退 IPv4；诊断弹窗显示 IPv6 模式。
+- **海外 DNS 走 DoH**：默认 `https://1.1.1.1/dns-query`，经节点出站，避免运营商 DNS 污染和节点丢弃 UDP 53；旧配置里的 `tcp+udp://8.8.8.8:53` 会在 App 启动时自动迁移，自定义上游保持不动。可在「分流 → DNS」改回或换成自己的解析器。连通性测试改为串行探测，避免慢节点被五个并发 TLS 握手压垮后误报。
 - **Resolver 清洗**：Android `dumpsys` 输出的 DNS 形如 `/10.0.2.3`，写入 `resolv.conf` 前会去掉 `/`、方括号和 zone id；否则整份文件非法，dae 的 Go resolver 会回落到 `[::1]:53`，网络检查/节点解析直接失败。
 - **Wi-Fi / 蜂窝双 WAN**：`wan_interface: auto` 由 `daepilotctl` 从 Android policy routing 解析当前默认接口（`wlan0`、`rmnet_dataN` 等），watchdog 检测到接口变化后自动重启 dae，避免 Wi-Fi/移动数据切换后仍绑定旧接口。模拟器上已验证 Wi-Fi → 移动数据切换后自动 `Bind to WAN: eth0` 并继续代理。
 - **rmnet 兼容**：模块自带的 dae payload 使用 L3 WAN egress hook，适配 Android rmnet 的 raw-IP；官方 L2 构建在 rmnet 上抓不到本地流量，因此不要替换移动网络场景下的 payload。
@@ -129,7 +130,7 @@ Magisk 管理器中的模块「动作」按钮可直接启停 dae。
 - 仅支持 arm64 + root；非 root 设备与 iOS 不在范围内。
 - 建议内核 ≥ 5.15 且启用 BTF。部分厂商内核缺少 cgroup2 或 BPF 权限，需自行调整 SELinux；`customize.sh` 会尝试一条非致命的 `magiskpolicy` 规则。
 - hysteria2 / TUIC 基于 QUIC，TCP 延迟测试无法反映真实可用性。
-- 「连通」测试若显示百度可用、Google / YouTube 不可达，且出口地区为 CN，通常表示当前节点没有可用的国际出口（节点隧道本身可能是通的）；请更换节点，这不是 App 的本地代理链路故障。
+- 「连通」测试若显示百度可用、Google / YouTube 不可达，且出口地区为 CN，通常表示当前节点没有可用的国际出口（节点隧道本身可能是通的）；请更换节点，这不是 App 的本地代理链路故障。测试串行执行，但低带宽或限速节点仍可能让单次请求超时，重试或换节点即可。
 - Clash / sing-box 转换覆盖常用字段；SSR、WireGuard、Snell 等类型会跳过并在导入结果中给出警告。
 - 订阅若使用明文 HTTP，App 已允许 cleartext；仍建议优先使用 HTTPS。
 - `dial_mode` 默认 `ip`：由手机侧解析后把目标 IP 交给节点，避开节点侧二次解析。部分节点的上游 DNS 会把域名解析到绕路地址，连接会卡住数十秒（同一节点实测 `domain` 1.3 KB/s、`ip` 2.5 MB/s）。分流仍按嗅探到的域名匹配；若确认节点侧解析更优，可改回 `domain`。

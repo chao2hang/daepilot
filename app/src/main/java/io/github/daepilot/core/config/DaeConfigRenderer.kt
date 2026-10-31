@@ -112,7 +112,7 @@ object DaeConfigRenderer {
 
     private fun StringBuilder.appendDns(dns: DnsConfig) {
         val domestic = dns.domesticUpstream.ifBlank { "udp://119.29.29.29:53" }
-        val foreign = dns.foreignUpstream.ifBlank { "tcp+udp://8.8.8.8:53" }
+        val foreign = dns.foreignUpstream.ifBlank { DnsConfig.DEFAULT_FOREIGN_UPSTREAM }
         append("dns {\n")
         append("  upstream {\n")
         append("    alidns: '").append(escapeSingleQuoted(domestic)).append("'\n")

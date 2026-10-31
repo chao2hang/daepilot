@@ -177,6 +177,7 @@ class DaeConfigRendererTest {
     fun dnsUsesRequestAndResponseSections() {
         val config = render(RenderSpec(nodes = listOf(hk)))
         assertTrue(config.contains("    request {\n      qname(geosite:cn) -> alidns\n      fallback: googledns\n    }"))
+        assertTrue(config.contains("googledns: 'https://1.1.1.1/dns-query'"))
         assertTrue(config.contains("    response {\n      upstream(googledns) -> accept\n"))
 
         val noCn = render(RenderSpec(nodes = listOf(hk), dns = DnsConfig(useDomesticForCn = false)))
