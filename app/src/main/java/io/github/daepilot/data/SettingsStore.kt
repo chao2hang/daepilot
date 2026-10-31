@@ -3,6 +3,7 @@ package io.github.daepilot.data
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -24,6 +25,7 @@ class SettingsStore(private val context: Context) {
         encodeDefaults = true
     }
     private val configKey = stringPreferencesKey("user_config_json")
+    private val rootGrantedKey = booleanPreferencesKey("root_granted")
 
     val config: Flow<UserConfig> = context.configDataStore.data
         .catch { emit(androidx.datastore.preferences.core.emptyPreferences()) }
@@ -48,6 +50,23 @@ class SettingsStore(private val context: Context) {
     suspend fun replace(config: UserConfig) {
         context.configDataStore.edit { prefs ->
             prefs[configKey] = json.encodeToString(UserConfig.serializer(), config)
+        }
+    }
+
+    /**
+     * Null until the app has seen a definitive su result on this install, so an
+     * upgrade can silently re-establish the session without prompting users who
+     * deliberately declined.
+     */
+    suspend fun rootGranted(): Boolean? {
+        val prefs = runCatching { context.configDataStore.data.first() }.getOrNull()
+            ?: return null
+        return prefs[rootGrantedKey]
+    }
+
+    suspend fun setRootGranted(granted: Boolean) {
+        runCatching {
+            context.configDataStore.edit { prefs -> prefs[rootGrantedKey] = granted }
         }
     }
 

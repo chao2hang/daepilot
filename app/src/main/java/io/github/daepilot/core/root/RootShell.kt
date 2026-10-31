@@ -10,6 +10,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
@@ -35,6 +37,10 @@ enum class RootRequestResult {
  * so callers must use [quote] for user-controlled arguments.
  */
 class RootShell {
+    // The UI and the foreground service can both discover a missing session after
+    // a reboot. Serialise acquisition so only one su request is in flight.
+    private val requestMutex = Mutex()
+
     /**
      * `Shell.isAppGrantedRoot()` only reports true when the app process itself
      * runs as uid 0, so it cannot be used to detect a granted su session. The
@@ -53,44 +59,46 @@ class RootShell {
      * closed first so a remembered denial can be retried without restarting.
      */
     suspend fun requestRoot(timeoutMs: Long = 90_000): RootRequestResult =
-        withContext(Dispatchers.IO) {
-            if (hasRootShell()) return@withContext RootRequestResult.GRANTED
-            runCatching {
-                Shell.getCachedShell()?.takeIf { !it.isRoot && it.isAlive }?.close()
-            }
-            // Separate scope: Shell.getShell() blocks until the su dialog is
-            // answered, and a child coroutine would keep the caller waiting
-            // even after withTimeout has already given up on it.
-            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-            val deferred = scope.async {
+        requestMutex.withLock {
+            withContext(Dispatchers.IO) {
+                if (hasRootShell()) return@withContext RootRequestResult.GRANTED
                 runCatching {
-                    // After closing a cached non-root shell libsu may hand the
-                    // closed instance back once; a second call builds afresh
-                    // and triggers the authorization dialog again.
-                    var shell = Shell.getShell()
-                    if (!shell.isAlive) shell = Shell.getShell()
-                    shell
+                    Shell.getCachedShell()?.takeIf { !it.isRoot && it.isAlive }?.close()
                 }
-            }
-            try {
-                val shell = withTimeout(timeoutMs) { deferred.await() }.getOrElse { error ->
-                    return@withContext if (error is NoShellException) {
-                        RootRequestResult.DENIED
-                    } else {
-                        RootRequestResult.ERROR
+                // Separate scope: Shell.getShell() blocks until the su dialog is
+                // answered, and a child coroutine would keep the caller waiting
+                // even after withTimeout has already given up on it.
+                val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+                val deferred = scope.async {
+                    runCatching {
+                        // After closing a cached non-root shell libsu may hand the
+                        // closed instance back once; a second call builds afresh
+                        // and triggers the authorization dialog again.
+                        var shell = Shell.getShell()
+                        if (!shell.isAlive) shell = Shell.getShell()
+                        shell
                     }
                 }
-                if (shell.isAlive && shell.isRoot) {
-                    RootRequestResult.GRANTED
-                } else {
-                    RootRequestResult.DENIED
+                try {
+                    val shell = withTimeout(timeoutMs) { deferred.await() }.getOrElse { error ->
+                        return@withContext if (error is NoShellException) {
+                            RootRequestResult.DENIED
+                        } else {
+                            RootRequestResult.ERROR
+                        }
+                    }
+                    if (shell.isAlive && shell.isRoot) {
+                        RootRequestResult.GRANTED
+                    } else {
+                        RootRequestResult.DENIED
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    RootRequestResult.TIMEOUT
+                } catch (e: Exception) {
+                    RootRequestResult.ERROR
+                } finally {
+                    scope.cancel()
                 }
-            } catch (e: TimeoutCancellationException) {
-                RootRequestResult.TIMEOUT
-            } catch (e: Exception) {
-                RootRequestResult.ERROR
-            } finally {
-                scope.cancel()
             }
         }
 

@@ -138,6 +138,8 @@ private fun NetworkContextCard(status: DaemonStatus) {
             "未授权 Root（不影响测试）；测试使用系统当前网络"
         status.mode == "module-missing" ->
             "Magisk 模块未安装；测试使用系统当前网络"
+        status.mode == "checking" || status.mode == "unknown" ->
+            "正在读取代理状态；测试使用系统当前网络"
         else -> "代理未启用；本次测试会直连"
     }
     GlassSurface(

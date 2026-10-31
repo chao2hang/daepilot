@@ -68,6 +68,7 @@ object NotificationHelper {
                     (status.version?.let { " · dae $it" } ?: "")
             }
             !status.lastError.isNullOrBlank() -> status.lastError
+            status.mode == "checking" || status.mode == "unknown" -> "正在同步运行状态…"
             else -> "代理已停止"
         }
 

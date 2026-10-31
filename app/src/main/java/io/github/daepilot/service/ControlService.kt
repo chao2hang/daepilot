@@ -9,6 +9,7 @@ import androidx.core.app.NotificationManagerCompat
 import io.github.daepilot.DaePilotApp
 import io.github.daepilot.data.AppContainer
 import io.github.daepilot.core.model.DaemonStatus
+import io.github.daepilot.core.root.RootRequestResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,6 +32,7 @@ class ControlService : Service() {
     private var pollJob: Job? = null
     private val notificationMutex = Mutex()
     private var lastNotifiedKey: String? = null
+    private var rootSessionChecked = false
 
     override fun onCreate() {
         super.onCreate()
@@ -82,6 +84,7 @@ class ControlService : Service() {
     }
 
     private suspend fun refreshStatus() {
+        ensureRootSession()
         val status = withContext(Dispatchers.IO) {
             runCatching { container.daemon.status() }.getOrDefault(
                 DaemonStatus(lastError = "无法读取 daemon 状态"),
@@ -100,6 +103,27 @@ class ControlService : Service() {
                     NotificationHelper.controlNotification(this, status),
                 )
             }
+        }
+    }
+
+    /**
+     * A sticky restart after a reboot has no cached su session; without this the
+     * notification would claim the daemon is stopped while it is running.
+     */
+    private suspend fun ensureRootSession() {
+        if (rootSessionChecked) return
+        rootSessionChecked = true
+        if (container.root.hasRootShell()) {
+            runCatching { container.settings.setRootGranted(true) }
+            return
+        }
+        if (runCatching { container.settings.rootGranted() }.getOrNull() == false) return
+        when (runCatching { container.root.requestRoot() }.getOrElse { RootRequestResult.ERROR }) {
+            RootRequestResult.GRANTED ->
+                runCatching { container.settings.setRootGranted(true) }
+            RootRequestResult.DENIED ->
+                runCatching { container.settings.setRootGranted(false) }
+            RootRequestResult.TIMEOUT, RootRequestResult.ERROR -> Unit
         }
     }
 

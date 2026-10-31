@@ -900,6 +900,7 @@ private fun modeLabel(mode: String): String = when (mode) {
     "no-root" -> "未授权 Root"
     "module-missing" -> "模块未安装"
     "chroot" -> "chroot"
-    "unknown" -> "未知"
+    "checking" -> "同步中"
+    "unknown" -> "同步中"
     else -> mode
 }

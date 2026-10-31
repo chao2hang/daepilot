@@ -101,6 +101,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private var logJob: Job? = null
     private var statusJob: Job? = null
+    // After a reboot the daemon keeps running but this process has no cached su
+    // session, so status reads would report "no-root" forever. One silent
+    // re-acquisition per process is enough; a manual request covers later loss.
+    private var rootSessionChecked = false
     // `status()` shells out to root with a 20 s timeout while the poller fires
     // every 12 s; refreshes are skipped rather than queued behind the call that is
     // already running, so waiters can never pile up on the root shell.
@@ -142,6 +146,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     "请到 Magisk / KernelSU / APatch 中清除本应用的拒绝记录后重试。"
             RootRequestResult.TIMEOUT -> "等待 root 授权超时，请重新点击「请求 root 权限」。"
             RootRequestResult.ERROR -> "无法发起 root 请求，请确认已安装 Magisk / KernelSU / APatch。"
+        }
+        if (result == RootRequestResult.GRANTED || result == RootRequestResult.DENIED) {
+            runCatching { container.settings.setRootGranted(result == RootRequestResult.GRANTED) }
         }
         _rootState.value = _rootState.value.copy(
             granted = result == RootRequestResult.GRANTED,
@@ -188,12 +195,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             // stack waiters behind a root command that can take the full timeout.
             if (!statusMutex.tryLock()) return@launch
             try {
+                ensureRootSession()
                 _status.value = runCatching { daemon.status() }.getOrElse {
                     DaemonStatus(lastError = it.message ?: "状态读取失败")
                 }
             } finally {
                 statusMutex.unlock()
             }
+        }
+    }
+
+    /**
+     * Rebuilds the su session that the app lost across a reboot. Skipped only
+     * when the user explicitly declined root before, so we never re-prompt a
+     * decision they already made.
+     */
+    private suspend fun ensureRootSession() {
+        if (rootSessionChecked) return
+        rootSessionChecked = true
+        if (container.root.hasRootShell()) {
+            runCatching { container.settings.setRootGranted(true) }
+            return
+        }
+        if (runCatching { container.settings.rootGranted() }.getOrNull() == false) return
+        when (runCatching { container.root.requestRoot() }.getOrElse { RootRequestResult.ERROR }) {
+            RootRequestResult.GRANTED ->
+                runCatching { container.settings.setRootGranted(true) }
+            RootRequestResult.DENIED ->
+                runCatching { container.settings.setRootGranted(false) }
+            RootRequestResult.TIMEOUT, RootRequestResult.ERROR -> Unit
         }
     }
 

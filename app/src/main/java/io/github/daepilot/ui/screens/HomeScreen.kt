@@ -234,8 +234,12 @@ private fun HeroCard(
     onToggle: () -> Unit,
 ) {
     val running = status.running
+    // After a reboot the status read has to re-establish the su session first;
+    // "syncing" keeps the card honest instead of flashing "已停止".
+    val syncing = status.mode == "checking" || status.mode == "unknown"
     val title = when {
         running -> "运行中"
+        syncing -> "正在同步"
         status.mode == "no-root" -> "需要 Root"
         status.mode == "module-missing" -> "需要模块"
         else -> "已停止"
@@ -244,6 +248,7 @@ private fun HeroCard(
         running -> selectedNode?.let {
             "${it.protocol.label} · ${it.endpoint?.host ?: "—"}"
         } ?: "透明代理已接管全部流量"
+        syncing -> "正在读取 daemon 的实时运行状态"
         status.mode == "no-root" -> "在 Magisk / KernelSU 中授权后继续"
         status.mode == "module-missing" -> "安装 dae 数据面模块后继续"
         else -> "选择节点，点按电源开始接管"
@@ -251,6 +256,7 @@ private fun HeroCard(
     val eyebrow = when {
         running -> "已连接"
         setup -> "待设置"
+        syncing -> "同步中"
         else -> "待机"
     }
     val palette = LocalDaeGlassPalette.current
@@ -492,7 +498,8 @@ private fun PowerOrb(
 
 @Composable
 private fun SignalCard(status: DaemonStatus, bootRequested: Boolean) {
-    val rootReady = status.mode != "no-root"
+    val rootKnown = status.mode != "checking" && status.mode != "unknown"
+    val rootReady = rootKnown && status.mode != "no-root"
     val bootValue = when {
         status.bootEnabled -> "已开启"
         bootRequested -> "待生效"
@@ -509,7 +516,11 @@ private fun SignalCard(status: DaemonStatus, bootRequested: Boolean) {
         ) {
             SignalCell(
                 label = "权限",
-                value = if (rootReady) "正常" else "未授权",
+                value = when {
+                    !rootKnown -> "同步中"
+                    rootReady -> "正常"
+                    else -> "未授权"
+                },
                 active = rootReady,
                 modifier = Modifier.weight(1f),
             )
