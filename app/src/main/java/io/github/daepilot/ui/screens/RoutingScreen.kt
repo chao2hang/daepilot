@@ -4,35 +4,55 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Numbers
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,12 +61,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.daepilot.core.config.DaeConfigValidator
+import io.github.daepilot.core.config.DomainMatch
+import io.github.daepilot.core.config.PresetSource
+import io.github.daepilot.core.config.RuleBuild
+import io.github.daepilot.core.config.RuleBuilder
+import io.github.daepilot.core.config.RuleDraft
+import io.github.daepilot.core.config.RuleKind
 import io.github.daepilot.core.model.AppSnapshot
 import io.github.daepilot.core.model.GroupPolicy
 import io.github.daepilot.core.model.OutboundGroup
@@ -138,11 +166,30 @@ fun RoutingScreen(
                 },
             ) {
                 if (snapshot.rules.isEmpty()) {
-                    Text(
-                        "暂无规则",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Text(
+                            "还没有规则，添加后会按顺序匹配流量",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                ruleEditor = null
+                                showRuleEditor = true
+                            },
+                            shape = MaterialTheme.shapes.small,
+                        ) {
+                            Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("添加规则")
+                        }
+                    }
                 }
                 snapshot.rules.forEachIndexed { index, rule ->
                     if (index > 0) RowDivider()
@@ -263,7 +310,7 @@ fun RoutingScreen(
     }
 
     if (showRuleEditor) {
-        RuleEditorDialog(
+        RuleEditorSheet(
             existing = ruleEditor,
             targets = targets,
             onDismiss = {
@@ -345,21 +392,37 @@ private fun RuleRow(
     onDelete: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    val parsed = remember(rule.expression) { RuleBuilder.parse(rule.expression) }
+    val title = remember(rule.expression) { RuleBuilder.describe(rule.expression) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Switch(checked = rule.enabled, onCheckedChange = onToggle)
         Column(
             modifier = Modifier
                 .weight(1f)
                 .padding(horizontal = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Text(
-                rule.expression,
-                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                title,
+                style = if (parsed == null) {
+                    MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                } else {
+                    MaterialTheme.typography.bodyMedium
+                },
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (parsed != null) {
+                Text(
+                    rule.expression,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Text(
-                "→ ${rule.outbound}",
+                "→ ${outboundLabel(rule.outbound)}",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
             )
@@ -410,78 +473,392 @@ private fun GroupRow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
-private fun RuleEditorDialog(
+private fun RuleEditorSheet(
     existing: RoutingRule?,
     targets: List<String>,
     onDismiss: () -> Unit,
     onSave: (String, String) -> Unit,
 ) {
-    var expression by remember(existing) { mutableStateOf(existing?.expression.orEmpty()) }
-    var outbound by remember(existing) { mutableStateOf(existing?.outbound ?: targets.firstOrNull() ?: "proxy") }
+    var draft by remember(existing) { mutableStateOf(initialRuleDraft(existing)) }
+    var outbound by remember(existing) {
+        mutableStateOf(existing?.outbound?.takeIf { it.isNotBlank() } ?: targets.firstOrNull() ?: "proxy")
+    }
     var error by remember(existing) { mutableStateOf<String?>(null) }
-    var menuOpen by remember { mutableStateOf(false) }
+    var targetMenu by remember { mutableStateOf(false) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val built = remember(draft) { RuleBuilder.build(draft) }
+    val shownError = error ?: built.error?.takeIf { ruleDraftHasInput(draft) }
+    val update: (RuleDraft) -> Unit = {
+        draft = it
+        error = null
+    }
+    val confirm = {
+        val result = RuleBuilder.build(draft)
+        if (!result.ok) {
+            error = result.error ?: "规则无效"
+        } else {
+            val validation = DaeConfigValidator.validateRule(result.expression)
+            if (!validation.ok) {
+                error = validation.message
+            } else {
+                onSave(result.expression, outbound)
+            }
+        }
+    }
 
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text(if (existing == null) "添加规则" else "编辑规则") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(
-                    value = expression,
-                    onValueChange = {
-                        expression = it
-                        error = null
-                    },
-                    label = { Text("匹配条件") },
-                    placeholder = { Text("domain(geosite:openai)") },
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        dragHandle = {
+            BottomSheetDefaults.DragHandle(
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+            )
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 22.dp, end = 22.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (existing == null) "添加规则" else "编辑规则",
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    Text(
+                        "选择类型并填写内容，会自动生成 dae 规则",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Outlined.Close, contentDescription = "关闭")
+                }
+            }
+
+            RuleKindPicker(selected = draft.kind, onSelect = { update(draft.copy(kind = it)) })
+
+            when (draft.kind) {
+                RuleKind.DOMAIN -> DomainRuleFields(draft, update)
+                RuleKind.IP -> IpRuleFields(draft, update)
+                RuleKind.PRESET -> PresetRuleFields(draft, update)
+                RuleKind.PORT -> PortRuleFields(draft, update)
+                RuleKind.ADVANCED -> AdvancedRuleFields(draft, update)
+            }
+
+            RulePreview(built = built, error = shownError, outbound = outbound)
+
+            Text("出口", style = MaterialTheme.typography.labelMedium)
+            Box {
+                OutlinedButton(
+                    onClick = { targetMenu = true },
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.small,
-                    minLines = 3,
-                    maxLines = 6,
-                    isError = error != null,
-                    supportingText = {
-                        Text(error ?: "可用函数：domain、dip、dport、pname、l4proto 等")
-                    },
-                )
-                Text("出口", style = MaterialTheme.typography.labelMedium)
-                Box {
-                    OutlinedButton(
-                        onClick = { menuOpen = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = MaterialTheme.shapes.small,
-                    ) {
-                        Text(outbound, modifier = Modifier.weight(1f))
-                        Text("▾")
-                    }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        targets.forEach { target ->
-                            DropdownMenuItem(
-                                text = { Text(target) },
-                                onClick = {
-                                    outbound = target
-                                    menuOpen = false
-                                },
-                            )
-                        }
+                ) {
+                    Text(outboundLabel(outbound), modifier = Modifier.weight(1f))
+                    Text("▾")
+                }
+                DropdownMenu(expanded = targetMenu, onDismissRequest = { targetMenu = false }) {
+                    targets.forEach { target ->
+                        DropdownMenuItem(
+                            text = { Text(outboundLabel(target)) },
+                            onClick = {
+                                outbound = target
+                                targetMenu = false
+                            },
+                        )
                     }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    val validation = DaeConfigValidator.validateRule(expression)
-                    if (!validation.ok) {
-                        error = validation.message
-                    } else {
-                        onSave(expression.trim(), outbound)
-                    }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                    shape = MaterialTheme.shapes.small,
+                ) { Text("取消") }
+                Button(
+                    onClick = confirm,
+                    modifier = Modifier.weight(1f),
+                    shape = MaterialTheme.shapes.small,
+                ) {
+                    Text(if (existing == null) "添加规则" else "保存修改")
+                }
+            }
+        }
+    }
+}
+
+private fun initialRuleDraft(existing: RoutingRule?): RuleDraft {
+    if (existing == null) return RuleDraft()
+    return RuleBuilder.parse(existing.expression)
+        ?: RuleDraft(kind = RuleKind.ADVANCED, advanced = existing.expression)
+}
+
+private fun outboundLabel(target: String): String = when (target) {
+    "proxy" -> "proxy · 代理"
+    "direct" -> "direct · 直连"
+    "block" -> "block · 阻断"
+    "must_direct" -> "must_direct · 不劫持 DNS 直连"
+    else -> target
+}
+
+private fun ruleDraftHasInput(draft: RuleDraft): Boolean = when (draft.kind) {
+    RuleKind.DOMAIN -> draft.domain.isNotBlank()
+    RuleKind.IP -> draft.ip.isNotBlank()
+    RuleKind.PRESET -> draft.preset.isNotBlank()
+    RuleKind.PORT -> draft.ports.isNotBlank()
+    RuleKind.ADVANCED -> draft.advanced.isNotBlank()
+}
+
+private val RuleKind.icon: ImageVector
+    get() = when (this) {
+        RuleKind.DOMAIN -> Icons.Outlined.Language
+        RuleKind.IP -> Icons.Outlined.Public
+        RuleKind.PRESET -> Icons.Outlined.Layers
+        RuleKind.PORT -> Icons.Outlined.Numbers
+        RuleKind.ADVANCED -> Icons.Outlined.Code
+    }
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RuleKindPicker(selected: RuleKind, onSelect: (RuleKind) -> Unit) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        RuleKind.entries.forEach { kind ->
+            FilterChip(
+                selected = selected == kind,
+                onClick = { onSelect(kind) },
+                label = { Text(kind.label) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = if (selected == kind) Icons.Outlined.Check else kind.icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
                 },
-            ) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DomainRuleFields(draft: RuleDraft, onDraft: (RuleDraft) -> Unit) {
+    Text("匹配方式", style = MaterialTheme.typography.labelMedium)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        DomainMatch.entries.forEach { mode ->
+            FilterChip(
+                selected = draft.domainMatch == mode,
+                onClick = { onDraft(draft.copy(domainMatch = mode)) },
+                label = { Text(mode.label) },
+            )
+        }
+    }
+    val label: String
+    val placeholder: String
+    val hint: String
+    when (draft.domainMatch) {
+        DomainMatch.SUFFIX -> {
+            label = "域名"
+            placeholder = "openai.com, chatgpt.com"
+            hint = "后缀匹配会同时命中所有子域名；粘贴链接会自动提取域名"
+        }
+        DomainMatch.FULL -> {
+            label = "完整域名"
+            placeholder = "dns.google"
+            hint = "只匹配完全相同的域名"
+        }
+        DomainMatch.KEYWORD -> {
+            label = "关键词"
+            placeholder = "facebook"
+            hint = "命中域名中包含该关键词的连接"
+        }
+        DomainMatch.REGEX -> {
+            label = "正则表达式"
+            placeholder = "\\.goo.*\\.com\$"
+            hint = "RE2 语法，不需要加引号"
+        }
+    }
+    OutlinedTextField(
+        value = draft.domain,
+        onValueChange = { onDraft(draft.copy(domain = it)) },
+        label = { Text(label) },
+        placeholder = { Text(placeholder) },
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        minLines = 1,
+        maxLines = 4,
+        singleLine = draft.domainMatch == DomainMatch.REGEX,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+        supportingText = { Text(hint) },
     )
+}
+
+@Composable
+private fun IpRuleFields(draft: RuleDraft, onDraft: (RuleDraft) -> Unit) {
+    OutlinedTextField(
+        value = draft.ip,
+        onValueChange = { onDraft(draft.copy(ip = it)) },
+        label = { Text("IP 或 CIDR") },
+        placeholder = { Text("1.2.3.4, 10.0.0.0/8, 2001:db8::/32") },
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        minLines = 1,
+        maxLines = 4,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+        supportingText = { Text("支持 IPv4、IPv6 和网段，多个用逗号或换行分隔") },
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PresetRuleFields(draft: RuleDraft, onDraft: (RuleDraft) -> Unit) {
+    Text("清单类型", style = MaterialTheme.typography.labelMedium)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        PresetSource.entries.forEach { source ->
+            FilterChip(
+                selected = draft.presetSource == source,
+                onClick = { onDraft(draft.copy(presetSource = source)) },
+                label = { Text(source.label) },
+            )
+        }
+    }
+    OutlinedTextField(
+        value = draft.preset,
+        onValueChange = { onDraft(draft.copy(preset = it)) },
+        label = { Text("清单代码") },
+        placeholder = {
+            Text(if (draft.presetSource == PresetSource.GEOSITE) "openai, google" else "cn, private")
+        },
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+        supportingText = {
+            Text(
+                if (draft.presetSource == PresetSource.GEOSITE) {
+                    "dae 内置 geosite 清单，只填代码，例如 cn、geolocation-!cn"
+                } else {
+                    "dae 内置 geoip 清单，只填代码，例如 cn、private、us"
+                },
+            )
+        },
+    )
+    Text(
+        "常用清单",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val suggestions = if (draft.presetSource == PresetSource.GEOSITE) {
+            RuleBuilder.geositeSuggestions
+        } else {
+            RuleBuilder.geoipSuggestions
+        }
+        suggestions.forEach { code ->
+            SuggestionChip(
+                onClick = { onDraft(draft.copy(preset = code)) },
+                label = { Text(code) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun PortRuleFields(draft: RuleDraft, onDraft: (RuleDraft) -> Unit) {
+    OutlinedTextField(
+        value = draft.ports,
+        onValueChange = { onDraft(draft.copy(ports = it)) },
+        label = { Text("目标端口") },
+        placeholder = { Text("443, 80, 1000-2000") },
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+        supportingText = { Text("单个端口、逗号分隔或端口段") },
+    )
+}
+
+@Composable
+private fun AdvancedRuleFields(draft: RuleDraft, onDraft: (RuleDraft) -> Unit) {
+    OutlinedTextField(
+        value = draft.advanced,
+        onValueChange = { onDraft(draft.copy(advanced = it)) },
+        label = { Text("dae 表达式") },
+        placeholder = { Text("domain(geosite:openai) && !dport(443)") },
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        minLines = 3,
+        maxLines = 8,
+        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+        supportingText = {
+            Text("支持 domain / dip / dport / l4proto / ipversion 等函数，可用 &&、||、! 组合")
+        },
+    )
+}
+
+@Composable
+private fun RulePreview(built: RuleBuild, error: String?, outbound: String) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "规则预览",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "→ $outbound",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            if (error != null) {
+                Text(
+                    error,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            } else {
+                Text(
+                    built.expression.ifBlank { "填写后自动生成" },
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = if (built.ok) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
+    }
 }
 
 @Composable
