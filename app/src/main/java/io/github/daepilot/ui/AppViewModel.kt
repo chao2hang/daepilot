@@ -13,6 +13,8 @@ import io.github.daepilot.DaePilotApp
 import io.github.daepilot.core.config.ConfigRedactor
 import io.github.daepilot.core.config.DaeConfigRenderer
 import io.github.daepilot.core.model.AppSettings
+import io.github.daepilot.core.network.DomainTestReport
+import io.github.daepilot.core.network.DomainTester
 import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
 import io.github.daepilot.core.model.DnsConfig
@@ -58,6 +60,12 @@ data class LogUploadState(
     val error: String? = null,
 )
 
+data class DomainTestUiState(
+    val running: Boolean = false,
+    val report: DomainTestReport? = null,
+    val error: String? = null,
+)
+
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val container = (application as DaePilotApp).container
     private val repo = container.repository
@@ -82,6 +90,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _logUpload = MutableStateFlow(LogUploadState())
     val logUpload: StateFlow<LogUploadState> = _logUpload.asStateFlow()
+
+    private val domainTester = DomainTester()
+    private val _domainTest = MutableStateFlow(DomainTestUiState())
+    val domainTest: StateFlow<DomainTestUiState> = _domainTest.asStateFlow()
+    private var domainTestJob: Job? = null
 
     private val messageChannel = Channel<String>(Channel.BUFFERED)
     val messages = messageChannel.receiveAsFlow()
@@ -343,6 +356,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 else -> "测试失败"
             },
         )
+    }
+
+    /** Manual egress test. Runs on the normal app network, so the dae hooks see
+     *  the same traffic a browser would. */
+    fun runDomainTests() {
+        if (domainTestJob?.isActive == true) return
+        domainTestJob = viewModelScope.launch {
+            val proxy = _status.value
+            _domainTest.value = DomainTestUiState(running = true)
+            val report = runCatching { domainTester.run(proxy.running, proxy.node) }
+            _domainTest.value = report.fold(
+                onSuccess = { DomainTestUiState(report = it) },
+                onFailure = {
+                    DomainTestUiState(error = it.message ?: it.javaClass.simpleName)
+                },
+            )
+            report.getOrNull()?.let { result ->
+                val ok = result.results.count { it.reachable }
+                val blocked = result.results.filter { !it.reachable }.map { it.target.label }
+                recordEvent(
+                    "连接测试：$ok/${result.results.size} 可达" +
+                        if (blocked.isEmpty()) "" else "，不可达 ${blocked.joinToString("/")}",
+                )
+            }
+        }
     }
 
     fun setTemplate(template: RoutingTemplate) = viewModelScope.launch {

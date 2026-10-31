@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.DataUsage
+import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Settings
@@ -86,6 +87,7 @@ fun HomeScreen(
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSubscriptions: () -> Unit,
+    onOpenTest: () -> Unit,
 ) {
     var showDiagnostics by remember { mutableStateOf(false) }
     val rootState by viewModel.rootState.collectAsStateWithLifecycle()
@@ -165,6 +167,7 @@ fun HomeScreen(
                     showDiagnostics = true
                     viewModel.diagnose()
                 },
+                onOpenTest = onOpenTest,
             )
         }
     }
@@ -756,6 +759,7 @@ private fun QuickActions(
     onTest: () -> Unit,
     onLogs: () -> Unit,
     onDiagnose: () -> Unit,
+    onOpenTest: () -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -778,6 +782,12 @@ private fun QuickActions(
             icon = Icons.Outlined.MonitorHeart,
             label = "诊断",
             onClick = onDiagnose,
+            modifier = Modifier.weight(1f),
+        )
+        GlassAction(
+            icon = Icons.Outlined.Language,
+            label = "连通",
+            onClick = onOpenTest,
             modifier = Modifier.weight(1f),
         )
     }

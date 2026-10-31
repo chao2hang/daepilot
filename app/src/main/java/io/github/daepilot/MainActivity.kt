@@ -79,6 +79,7 @@ import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.components.AmbientBackground
 import io.github.daepilot.ui.screens.HomeScreen
 import io.github.daepilot.ui.screens.LogsScreen
+import io.github.daepilot.ui.screens.NetworkTestScreen
 import io.github.daepilot.ui.screens.NodesScreen
 import io.github.daepilot.ui.screens.RoutingScreen
 import io.github.daepilot.ui.screens.SettingsScreen
@@ -205,6 +206,9 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
                             onOpenLogs = openLogs,
                             onOpenSettings = { navController.navigateToTab("settings") },
                             onOpenSubscriptions = { navController.navigateToTab("subscriptions") },
+                            onOpenTest = {
+                                navController.navigate("test") { launchSingleTop = true }
+                            },
                         )
                     }
                     composable("subscriptions") {
@@ -221,6 +225,13 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
                             viewModel = viewModel,
                             logs = logs,
                             upload = upload,
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+                    composable("test") {
+                        NetworkTestScreen(
+                            viewModel = viewModel,
+                            status = status,
                             onBack = { navController.popBackStack() },
                         )
                     }

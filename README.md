@@ -12,6 +12,7 @@ DaePilot 是 [dae](https://github.com/daeuniverse/dae) eBPF 透明代理的 Andr
 - 订阅导入：分享链接列表、base64 链接列表、Clash / Clash.Meta YAML、sing-box JSON
 - 订阅自动更新（WorkManager，支持机场返回的 `profile-update-interval`）
 - 节点列表、搜索、收藏、TCP 延迟测试；HY2 / TUIC 等 QUIC 节点使用 ICMP 延迟并在界面标注
+- 域名连通性测试：首页「连通」检查 Google / YouTube / GitHub / Telegram / 百度，显示各站点的 HTTP 状态、耗时和失败原因，并读取代理出口 IP / 地区，区分“节点没有国际出口”和“本地代理链路异常”
 - 分流模板：绕过大陆 / 全局代理 / 白名单 / 仅直连
 - 自定义分流规则（`domain` / `dip` / `pname` / `dport` …）与自定义出口分组
 - DNS 上游与分流策略编辑
@@ -87,7 +88,7 @@ gradle :app:assembleDebug
 gradle :app:testDebugUnitTest
 ```
 
-覆盖分享链接解析、三种订阅格式、配置渲染（分组/策略/DNS/自环绕过）、规则校验与内核版本解析。
+覆盖分享链接解析、三种订阅格式、配置渲染（分组/策略/DNS/自环绕过）、规则校验与内核版本解析，以及域名探测的结果分类和 Cloudflare 出口信息解析。
 
 ## 刷新 dae payload
 
@@ -128,6 +129,7 @@ Magisk 管理器中的模块「动作」按钮可直接启停 dae。
 - 仅支持 arm64 + root；非 root 设备与 iOS 不在范围内。
 - 建议内核 ≥ 5.15 且启用 BTF。部分厂商内核缺少 cgroup2 或 BPF 权限，需自行调整 SELinux；`customize.sh` 会尝试一条非致命的 `magiskpolicy` 规则。
 - hysteria2 / TUIC 基于 QUIC，TCP 延迟测试无法反映真实可用性。
+- 「连通」测试若显示百度可用、Google / YouTube 不可达，且出口地区为 CN，通常表示当前节点没有可用的国际出口（节点隧道本身可能是通的）；请更换节点，这不是 App 的本地代理链路故障。
 - Clash / sing-box 转换覆盖常用字段；SSR、WireGuard、Snell 等类型会跳过并在导入结果中给出警告。
 - 订阅若使用明文 HTTP，App 已允许 cleartext；仍建议优先使用 HTTPS。
 - `dial_mode` 默认 `ip`：由手机侧解析后把目标 IP 交给节点，避开节点侧二次解析。部分节点的上游 DNS 会把域名解析到绕路地址，连接会卡住数十秒（同一节点实测 `domain` 1.3 KB/s、`ip` 2.5 MB/s）。分流仍按嗅探到的域名匹配；若确认节点侧解析更优，可改回 `domain`。
