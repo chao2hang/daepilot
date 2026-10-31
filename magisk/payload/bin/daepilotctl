@@ -342,6 +342,24 @@ detect_wan_interface() {
   printf '%s\n' "$dev"
 }
 
+# The saved config contains the concrete WAN from the last apply. Android can
+# rename the cellular interface across boots (rmnet_data1 -> rmnet_data3), so
+# a boot start otherwise binds an interface that has no address. Refresh the
+# field from the current default route before staging the chroot config.
+refresh_wan_config() {
+  local file wan tmp
+  file="$1"
+  wan="$(detect_wan_interface 2>/dev/null)" || return 0
+  [ -n "$wan" ] || return 0
+  tmp="$file.wan.$$"
+  if sed "s/^\([[:space:]]*wan_interface:\).*/\1 $wan/" "$file" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$file" 2>/dev/null
+    chmod 600 "$file" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+}
+
 # Print up to two IPv4 resolvers of the active WAN. Several cellular carriers
 # drop queries to public resolvers such as 119.29.29.29 while their own
 # resolvers keep working, so dae's domestic upstream must follow the network.
@@ -890,6 +908,9 @@ start_daemon() {
     say "already running (pid $pid)"
     return 0
   fi
+  # A reboot can rename rmnet_dataN; never start with the previous boot's
+  # interface baked into the saved config.
+  refresh_wan_config "$CONF"
   # Recover a fwmark rule left behind by a crash/reboot before revalidating.
   remove_dae_route
   # A crashed instance can leave its dae0 link behind; attaching the TC hook

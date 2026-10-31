@@ -14,8 +14,16 @@ BASE=/data/adb/daepilot
   done
 
   # Do not probe the main-table default route here: Android keeps it in a
-  # policy table, so this loop usually waited the full 60 s before starting.
-  # daepilotctl already waits for a usable network and retries its own start.
+  # policy table, so that check usually waited the full 60 s before starting.
+  # Wait for a global IPv4 instead (the cellular interface may appear after
+  # bootanim); then ctl refresh_wan_config can bind the right rmnet_dataN.
+  i=0
+  while [ "$i" -lt 12 ]; do
+    if ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then break; fi
+    sleep 5
+    i=$((i + 1))
+  done
+
   if [ -x "$BASE/bin/daepilotctl" ] && [ -f "$BASE/boot_enabled" ]; then
     attempt=1
     while [ "$attempt" -le 3 ]; do
