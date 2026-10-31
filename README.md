@@ -18,7 +18,7 @@ DaePilot 是 [dae](https://github.com/daeuniverse/dae) eBPF 透明代理的 Andr
 - DNS 上游与分流策略编辑
 - 实时日志查看、级别过滤、搜索、导出，以及手动上传诊断日志
 - 崩溃自动恢复：模块 watchdog 每 15 秒检查一次，daemon 退出后自动拉起
-- 开机自启（App 开关 + 模块 `service.sh`，不依赖 App 启动）
+- 开机自启（App 开关 + 模块 `service.sh`，不依赖 App 启动；boot 后会重试启动并补启 watchdog，不再等待 Android 主路由表的默认路由 60 秒）
 - 兼容性自检：内核版本、BTF、cgroup2、BPF JIT、可用内存、root、模块与冲突进程
 
 ## 架构
