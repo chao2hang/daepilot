@@ -1,6 +1,7 @@
 package io.github.daepilot.data
 
 import android.content.Context
+import io.github.daepilot.core.config.ConfigDrift
 import io.github.daepilot.core.model.ConnectionState
 import io.github.daepilot.core.model.DaemonStatus
 import io.github.daepilot.core.root.DaemonController
@@ -90,5 +91,34 @@ class AppContainer(context: Context) {
         } finally {
             statusMutex.unlock()
         }
+    }
+
+    private val reconcileMutex = Mutex()
+
+    /**
+     * Keeps the daemon's configuration in step with what the app renders.
+     *
+     * The app is only a frontend: after an update the daemon keeps running with
+     * the configuration of the previous version, so a new rule only took effect
+     * once the user happened to touch a setting. Comparing the rendered text
+     * with the deployed one closes that gap without any UI interaction.
+     */
+    suspend fun reconcileConfig(): Boolean = reconcileMutex.withLock {
+        // An uncaught failure here would take the whole process down, and this
+        // runs on every app start.
+        runCatching {
+            if (!root.hasRootShell()) {
+                // Only a session the user granted before is re-established here:
+                // a background start must never pop an authorization dialog.
+                if (runCatching { settings.rootGranted() }.getOrNull() != true) return@runCatching false
+                ensureRootSession()
+                if (!root.hasRootShell()) return@runCatching false
+            }
+            val desired = repository.render(repository.snapshotNow())
+            val deployed = daemon.readDeployedConfig() ?: return@runCatching false
+            if (!ConfigDrift.differs(desired, deployed)) return@runCatching false
+            val running = runCatching { daemon.status().running }.getOrDefault(false)
+            daemon.applyConfig(desired, reload = running).ok
+        }.getOrDefault(false)
     }
 }

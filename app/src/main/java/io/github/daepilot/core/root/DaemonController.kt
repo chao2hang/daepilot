@@ -81,6 +81,13 @@ class DaemonController(
     suspend fun enableBootStart(): ActionResult = runCtl("enable")
     suspend fun disableBootStart(): ActionResult = runCtl("disable")
 
+    /** The configuration currently deployed on the device, or null when unknown. */
+    suspend fun readDeployedConfig(): String? = withContext(Dispatchers.IO) {
+        if (!root.isRootAvailable()) return@withContext null
+        val result = root.runLenient("cat ${DaePaths.CONFIG}", timeoutMs = 20_000)
+        result.out.takeIf { it.isNotBlank() }
+    }
+
     suspend fun applyConfig(config: String, reload: Boolean = true): ActionResult =
         withContext(Dispatchers.IO) {
             controlled {
