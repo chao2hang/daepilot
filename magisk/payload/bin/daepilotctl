@@ -861,6 +861,11 @@ daemon_pid() {
 is_running() { daemon_pid >/dev/null 2>&1; }
 
 rotate_log() {
+  # dae inherits the log fd from the spawning shell and never reopens it, so
+  # moving the file mid-life would orphan the fd: dae keeps writing into the
+  # rotated inode while the fresh log stays empty forever. Only rotate while
+  # the daemon is down (i.e. right before a start).
+  is_running && return 0
   size=0
   [ -f "$LOG" ] && size="$(wc -c < "$LOG" 2>/dev/null | tr -dc '0-9')"
   [ -n "$size" ] || size=0
@@ -1036,6 +1041,9 @@ start_daemon() {
     # The instance may have been adopted after a crash that also lost the
     # fwmark rule; restore it so dae's own dials keep working.
     ensure_dae_route >/dev/null 2>&1 || true
+    # A watchdog can die on its own (e.g. its script was replaced under it);
+    # an already-running daemon must still heal it on any start.
+    ensure_watchdog
     say "already running (pid $pid)"
     return 0
   fi

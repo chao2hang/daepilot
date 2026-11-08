@@ -56,6 +56,12 @@ class ControlService : Service() {
         pollJob = scope.launch {
             while (isActive) {
                 val status = refreshStatus()
+                // The watchdog can die independently of dae (a replaced script
+                // kills the running shell). Heal it instead of leaving the
+                // daemon unattended until the next manual start.
+                if (status?.running == true && !status.watchdog) {
+                    runCatching { container.daemon.start() }
+                }
                 // A stopped daemon changes state rarely; polling it every 30s
                 // only burns root-shell wakeups.
                 delay(if (status?.running == true) 30_000 else 120_000)

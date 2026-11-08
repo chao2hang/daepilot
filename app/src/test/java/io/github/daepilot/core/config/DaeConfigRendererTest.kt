@@ -303,6 +303,17 @@ class DaeConfigRendererTest {
     }
 
     @Test
+    fun playFrontendsResolveDomesticallyWithoutTheProxy() {
+        val config = render(RenderSpec(nodes = listOf(hk)))
+        val rule = config.indexOf("qname(suffix: play.googleapis.com")
+        val aaaa = config.indexOf("qtype(AAAA) && !qname(geosite:cn) -> reject")
+        val fallback = config.indexOf("fallback: googledns")
+        assertTrue(rule in 0 until fallback)
+        assertTrue(aaaa in 0 until rule)
+        assertTrue(config.contains("suffix: services.googleapis.cn, suffix: gvt1.com"))
+    }
+
+    @Test
     fun healthCheckIntervalScalesWithNodeCount() {
         fun interval(nodes: List<Node>) = Regex("check_interval: (\\d+)s")
             .find(render(RenderSpec(nodes = nodes)))!!
@@ -322,7 +333,7 @@ class DaeConfigRendererTest {
         assertFalse(config.contains("qname(suffix: 1.2.3.4)"))
 
         val ipOnly = render(RenderSpec(nodes = listOf(hk)))
-        assertFalse(ipOnly.contains("qname(suffix:"))
+        assertFalse(ipOnly.contains("suffix: 1.2.3.4"))
     }
 
     @Test
@@ -333,6 +344,8 @@ class DaeConfigRendererTest {
                 "    request {\n" +
                     "      qname(geosite:cn) -> alidns\n" +
                     "      qtype(AAAA) && !qname(geosite:cn) -> reject\n" +
+                    "      qname(suffix: play.googleapis.com, suffix: googleapis.cn, " +
+                    "suffix: services.googleapis.cn, suffix: gvt1.com, suffix: gvt2.com) -> alidns\n" +
                     "      fallback: googledns\n" +
                     "    }",
             ),

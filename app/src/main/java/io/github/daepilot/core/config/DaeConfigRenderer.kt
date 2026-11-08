@@ -163,6 +163,14 @@ object DaeConfigRenderer {
                 .append(nodeNames.joinToString(", ") { "suffix: $it" })
                 .append(") -> alidns\n")
         }
+        // Play's API and download frontends are served from CN caches. Resolving
+        // them through the foreign DoH adds a proxy round trip that times out
+        // whenever the node is slow, and the resulting SERVFAIL breaks Play
+        // itself; the domestic resolver answers these directly and correctly.
+        append(
+            "      qname(suffix: play.googleapis.com, suffix: googleapis.cn, " +
+                "suffix: services.googleapis.cn, suffix: gvt1.com, suffix: gvt2.com) -> alidns\n",
+        )
         append("      fallback: googledns\n")
         append("    }\n")
         append("    response {\n")
