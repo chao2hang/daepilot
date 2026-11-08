@@ -30,11 +30,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Article
-import androidx.compose.material.icons.outlined.ChevronRight
-import androidx.compose.material.icons.outlined.DataUsage
-import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.MonitorHeart
-import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.rounded.PowerSettingsNew
@@ -44,8 +46,8 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,6 +59,8 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -65,9 +69,14 @@ import io.github.daepilot.core.model.AppSnapshot
 import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
 import io.github.daepilot.core.model.Node
-import io.github.daepilot.core.model.TrafficInfo
+import io.github.daepilot.core.model.OutboundGroup
+import io.github.daepilot.core.network.DomainTarget
+import io.github.daepilot.core.network.DomainTargets
+import io.github.daepilot.core.network.DomainTestResult
 import io.github.daepilot.ui.AppViewModel
+import io.github.daepilot.ui.BandwidthState
 import io.github.daepilot.ui.Format
+import io.github.daepilot.ui.SiteProbeState
 import io.github.daepilot.ui.components.DiagnosticsDialog
 import io.github.daepilot.ui.components.GlassAction
 import io.github.daepilot.ui.components.GlassIconButton
@@ -75,6 +84,7 @@ import io.github.daepilot.ui.components.GlassSurface
 import io.github.daepilot.ui.components.ScreenBottom
 import io.github.daepilot.ui.components.ScreenEdge
 import io.github.daepilot.ui.theme.LocalDaeGlassPalette
+import kotlinx.coroutines.delay
 
 @Composable
 fun HomeScreen(
@@ -86,25 +96,20 @@ fun HomeScreen(
     onOpenNodes: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenSubscriptions: () -> Unit,
-    onOpenTest: () -> Unit,
 ) {
     var showDiagnostics by remember { mutableStateOf(false) }
     val rootState by viewModel.rootState.collectAsStateWithLifecycle()
+    val probes by viewModel.siteProbes.collectAsStateWithLifecycle()
+    val bandwidth by viewModel.bandwidth.collectAsStateWithLifecycle()
+    LaunchedEffect(status.running) {
+        if (status.running) viewModel.refreshSiteProbes()
+    }
     val selectedNode = snapshot.nodes.firstOrNull { it.id == snapshot.selectedNodeId }
-    val aggregateTraffic = remember(snapshot.subscriptions) {
-        val list = snapshot.subscriptions.mapNotNull { it.traffic }
-        if (list.isEmpty()) {
-            null
-        } else {
-            TrafficInfo(
-                uploadBytes = list.sumOf { it.uploadBytes },
-                downloadBytes = list.sumOf { it.downloadBytes },
-                totalBytes = list.sumOf { it.totalBytes },
-                expireAtEpochSeconds = list.map { it.expireAtEpochSeconds }
-                    .filter { it > 0 }.minOrNull() ?: 0,
-            )
-        }
+    val defaultGroup = remember(snapshot.groups, snapshot.defaultGroupId) {
+        snapshot.groups.firstOrNull { it.id == snapshot.defaultGroupId && it.enabled }
+    }
+    val defaultGroupMembers = remember(defaultGroup, snapshot.nodes) {
+        defaultGroup?.nodeIds?.count { id -> snapshot.nodes.any { it.id == id } } ?: 0
     }
     val setup = status.mode == "no-root" || status.mode == "module-missing"
     val setupLoading = (status.mode == "no-root" && rootState.requesting) ||
@@ -141,22 +146,34 @@ fun HomeScreen(
             HeroCard(
                 status = status,
                 selectedNode = selectedNode,
+                defaultGroup = defaultGroup,
+                defaultGroupMembers = defaultGroupMembers,
                 busy = busy,
                 setup = setup,
                 setupLabel = setupLabel,
                 setupLoading = setupLoading,
                 onSetup = onSetup,
                 onToggle = { viewModel.toggleProxy(!status.running) },
+                onOpenNodes = onOpenNodes,
+            )
+        }
+        item { ResourceCard(status) }
+        item {
+            SiteCard(
+                probes = probes,
+                running = status.running,
+                onTest = viewModel::testSite,
+            )
+        }
+        item {
+            BandwidthCard(
+                state = bandwidth,
+                proxyRunning = status.running,
+                onTest = viewModel::testBandwidth,
             )
         }
         item {
             SignalCard(status = status, bootRequested = snapshot.settings.bootStart)
-        }
-        item {
-            NodeCard(selectedNode = selectedNode, onOpenNodes = onOpenNodes)
-        }
-        item {
-            TrafficCard(traffic = aggregateTraffic, onOpenSubscriptions = onOpenSubscriptions)
         }
         item {
             QuickActions(
@@ -167,7 +184,6 @@ fun HomeScreen(
                     showDiagnostics = true
                     viewModel.diagnose()
                 },
-                onOpenTest = onOpenTest,
             )
         }
     }
@@ -226,12 +242,15 @@ private fun HomeHeader(
 private fun HeroCard(
     status: DaemonStatus,
     selectedNode: Node?,
+    defaultGroup: OutboundGroup?,
+    defaultGroupMembers: Int,
     busy: Boolean,
     setup: Boolean,
     setupLabel: String?,
     setupLoading: Boolean,
     onSetup: (() -> Unit)?,
     onToggle: () -> Unit,
+    onOpenNodes: () -> Unit,
 ) {
     val running = status.running
     // After a reboot the status read has to re-establish the su session first;
@@ -245,9 +264,13 @@ private fun HeroCard(
         else -> "已停止"
     }
     val detail = when {
-        running -> selectedNode?.let {
-            "${it.protocol.label} · ${it.endpoint?.host ?: "—"}"
-        } ?: "透明代理已接管全部流量"
+        running -> when {
+            defaultGroup != null ->
+                "${defaultGroup.policy.label} · $defaultGroupMembers 个节点"
+            selectedNode != null ->
+                "${selectedNode.protocol.label} · ${selectedNode.endpoint?.host ?: "—"}"
+            else -> "透明代理已接管全部流量"
+        }
         syncing -> "正在读取 daemon 的实时运行状态"
         status.mode == "no-root" -> "在 Magisk / KernelSU 中授权后继续"
         status.mode == "module-missing" -> "安装 dae 数据面模块后继续"
@@ -270,6 +293,7 @@ private fun HeroCard(
         shape = RoundedCornerShape(30.dp),
         contentPadding = PaddingValues(20.dp),
         spacing = 16.dp,
+        onClick = onOpenNodes,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -497,6 +521,467 @@ private fun PowerOrb(
 }
 
 @Composable
+private fun ResourceCard(status: DaemonStatus) {
+    val running = status.running
+    val palette = LocalDaeGlassPalette.current
+    // startedAt is absolute, so tick locally: StateFlow dedups equal statuses and
+    // the uptime would otherwise sit still while CPU and RSS stay flat.
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(running) {
+        while (running) {
+            now = System.currentTimeMillis()
+            delay(15_000)
+        }
+    }
+    val uptimeSeconds = if (running && status.startedAt > 0) {
+        ((now - status.startedAt) / 1000).coerceAtLeast(0)
+    } else {
+        0L
+    }
+    val cpu = status.cpuPercent
+    val cpuTone = when {
+        !running -> MaterialTheme.colorScheme.outline
+        cpu == null -> MaterialTheme.colorScheme.onSurfaceVariant
+        cpu >= 60 -> MaterialTheme.colorScheme.error
+        cpu >= 25 -> palette.warning
+        else -> palette.success
+    }
+    val memKb = status.rssKb
+    val memTone = when {
+        !running -> MaterialTheme.colorScheme.outline
+        memKb <= 0 -> MaterialTheme.colorScheme.onSurfaceVariant
+        memKb >= 256L * 1024 -> MaterialTheme.colorScheme.error
+        memKb >= 128L * 1024 -> palette.warning
+        else -> palette.success
+    }
+    val uptimeTone = if (running) palette.success else MaterialTheme.colorScheme.outline
+
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        contentPadding = PaddingValues(12.dp),
+        spacing = 0.dp,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ResourceStat(
+                label = "CPU",
+                value = if (running) Format.percent(cpu) else "—",
+                tone = cpuTone,
+                modifier = Modifier.weight(1f),
+            )
+            ResourceStat(
+                label = "内存",
+                value = if (running) Format.memory(memKb) else "—",
+                tone = memTone,
+                modifier = Modifier.weight(1f),
+            )
+            ResourceStat(
+                label = "运行时长",
+                value = if (running) compactUptime(uptimeSeconds) else "—",
+                tone = uptimeTone,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+/** Two units at most so the value fits a third of the card width. */
+private fun compactUptime(seconds: Long): String {
+    val days = seconds / 86400
+    val hours = (seconds % 86400) / 3600
+    val minutes = (seconds % 3600) / 60
+    return when {
+        days > 0 -> "${days}天${hours}时"
+        hours > 0 -> "${hours}时${minutes}分"
+        minutes > 0 -> "${minutes}分"
+        else -> "${seconds}秒"
+    }
+}
+
+@Composable
+private fun ResourceStat(
+    label: String,
+    value: String,
+    tone: Color,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+        Row(
+            modifier = Modifier.padding(top = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(5.dp)
+                    .clip(CircleShape)
+                    .background(tone),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                value,
+                style = MaterialTheme.typography.titleSmall,
+                color = tone,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SiteCard(
+    probes: SiteProbeState,
+    running: Boolean,
+    onTest: (String) -> Unit,
+) {
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 15.dp),
+        spacing = 9.dp,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "站点连通",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    if (running) "每 2 分钟自动刷新 · 点按图标单独测试" else "代理未启用 · 点击图标可测直连",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (probes.lastRunAt > 0) {
+                Text(
+                    Format.relativeTime(probes.lastRunAt),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        DomainTargets.home.chunked(4).forEach { rowTargets ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                rowTargets.forEach { target ->
+                    SiteTile(
+                        target = target,
+                        result = probes.results[target.host],
+                        testing = probes.testing.contains(target.host),
+                        onClick = { onTest(target.host) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+        if (!running) {
+            Text(
+                "启用代理后再测，才能确认节点是否真正连通。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SiteTile(
+    target: DomainTarget,
+    result: DomainTestResult?,
+    testing: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val palette = LocalDaeGlassPalette.current
+    val brand = siteBrand(target)
+    val brandIcon = brand.icon
+    val reachable = result?.reachable
+    val latencyMs = result?.latencyMs
+    val tone = when {
+        testing || reachable == null -> MaterialTheme.colorScheme.onSurfaceVariant
+        !reachable -> MaterialTheme.colorScheme.error
+        // A full DNS + TCP + TLS handshake through an overseas node routinely
+        // lands around 0.5-1.5 s, so only flag genuinely slow sites.
+        latencyMs != null && latencyMs < 1000 -> palette.success
+        else -> palette.warning
+    }
+    val latency = when {
+        testing -> "测试中"
+        reachable == null -> "未测"
+        !reachable -> "失败"
+        latencyMs != null -> "$latencyMs ms"
+        else -> "未测"
+    }
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(enabled = !testing, onClick = onClick)
+            .padding(vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .clip(RoundedCornerShape(13.dp))
+                .background(brand.background)
+                .border(
+                    0.75.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.40f),
+                    RoundedCornerShape(13.dp),
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            when {
+                testing -> CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = brand.foreground,
+                )
+                brandIcon != null -> Icon(
+                    brandIcon,
+                    contentDescription = null,
+                    tint = brand.foreground,
+                    modifier = Modifier.size(21.dp),
+                )
+                else -> Text(
+                    brand.glyph.orEmpty(),
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = brand.foreground,
+                )
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(
+            target.label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            latency,
+            style = MaterialTheme.typography.labelSmall,
+            color = tone,
+            maxLines = 1,
+        )
+    }
+}
+
+private data class SiteBrand(
+    val background: Color,
+    val foreground: Color,
+    val glyph: String? = null,
+    val icon: ImageVector? = null,
+)
+
+@Composable
+private fun siteBrand(target: DomainTarget): SiteBrand = when (target.host) {
+    "google.com" -> SiteBrand(Color(0xFFF8F9FA), Color(0xFF4285F4), glyph = "G")
+    "youtube.com" -> SiteBrand(Color(0xFFFF0000), Color.White, icon = Icons.Outlined.PlayArrow)
+    "github.com" -> SiteBrand(Color(0xFF24292F), Color.White, icon = Icons.Outlined.Code)
+    "telegram.org" -> SiteBrand(Color(0xFF229ED9), Color.White, icon = Icons.AutoMirrored.Outlined.Send)
+    "chatgpt.com" -> SiteBrand(Color(0xFF10A37F), Color.White, icon = Icons.Outlined.AutoAwesome)
+    "netflix.com" -> SiteBrand(Color(0xFF141414), Color(0xFFE50914), glyph = "N")
+    "x.com" -> SiteBrand(Color(0xFF000000), Color.White, glyph = "X")
+    "baidu.com" -> SiteBrand(Color(0xFF2932E1), Color.White, glyph = "百")
+    else -> SiteBrand(
+        MaterialTheme.colorScheme.surfaceVariant,
+        MaterialTheme.colorScheme.onSurfaceVariant,
+        glyph = target.label.take(1),
+    )
+}
+
+@Composable
+private fun BandwidthCard(
+    state: BandwidthState,
+    proxyRunning: Boolean,
+    onTest: () -> Unit,
+) {
+    val result = state.result
+    val failed = result != null && result.downloadMbps == null && result.uploadMbps == null
+    val error = result?.error
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        contentPadding = PaddingValues(16.dp),
+        spacing = 11.dp,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.80f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.Speed,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "代理带宽",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    when {
+                        state.running -> "正在测试下载与上传…"
+                        result == null -> "点按测速：5 MB 下载 / 2 MB 上传"
+                        proxyRunning -> "最近一次经代理测速"
+                        state.proxied -> "最近一次经代理测速（代理已停止）"
+                        else -> "最近一次为直连测速"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Surface(
+                onClick = onTest,
+                enabled = !state.running,
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                contentColor = MaterialTheme.colorScheme.primary,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (state.running) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(13.dp),
+                            strokeWidth = 2.dp,
+                            color = LocalContentColor.current,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(
+                        if (state.running) "测速中" else "测速",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            BandwidthValue(
+                label = "下载",
+                value = result?.downloadMbps,
+                icon = Icons.Outlined.ArrowDownward,
+                modifier = Modifier.weight(1f),
+            )
+            BandwidthValue(
+                label = "上传",
+                value = result?.uploadMbps,
+                icon = Icons.Outlined.ArrowUpward,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (state.testedAt > 0) {
+                Text(
+                    "测试于 ${Format.relativeTime(state.testedAt)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            if (result != null && (result.downloadBytes > 0 || result.uploadBytes > 0)) {
+                Text(
+                    "↓ ${Format.bytes(result.downloadBytes)} · ↑ ${Format.bytes(result.uploadBytes)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (failed && error != null) {
+            Text(
+                "测速失败：$error",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun BandwidthValue(
+    label: String,
+    value: Double?,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Row(
+            modifier = Modifier.padding(top = 3.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Text(
+                Format.mbps(value),
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                "Mbps",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 3.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun SignalCard(status: DaemonStatus, bootRequested: Boolean) {
     val rootKnown = status.mode != "checking" && status.mode != "unknown"
     val rootReady = rootKnown && status.mode != "no-root"
@@ -595,182 +1080,11 @@ private fun VerticalRule() {
 }
 
 @Composable
-private fun NodeCard(selectedNode: Node?, onOpenNodes: () -> Unit) {
-    GlassSurface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
-        contentPadding = PaddingValues(15.dp),
-        spacing = 0.dp,
-        onClick = onOpenNodes,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(13.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.80f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Outlined.Public,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "当前节点",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    selectedNode?.name ?: "自动选择",
-                    style = MaterialTheme.typography.bodyLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    selectedNode?.let {
-                        "${it.protocol.label} · ${it.endpoint?.host ?: "—"}"
-                    } ?: "按最低延迟自动切换",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (selectedNode?.latencyMs != null) {
-                Spacer(Modifier.width(8.dp))
-                val latency = selectedNode.latencyMs
-                val tone = when {
-                    latency < 100 -> LocalDaeGlassPalette.current.success
-                    latency < 250 -> LocalDaeGlassPalette.current.warning
-                    else -> MaterialTheme.colorScheme.error
-                }
-                Surface(
-                    shape = CircleShape,
-                    color = tone.copy(alpha = 0.12f),
-                    contentColor = tone,
-                ) {
-                    Text(
-                        "$latency ms",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-                    )
-                }
-            }
-            Spacer(Modifier.width(3.dp))
-            Icon(
-                Icons.Outlined.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun TrafficCard(traffic: TrafficInfo?, onOpenSubscriptions: () -> Unit) {
-    GlassSurface(
-        shape = RoundedCornerShape(22.dp),
-        contentPadding = PaddingValues(18.dp),
-        spacing = 12.dp,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(13.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.80f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Outlined.DataUsage,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "订阅流量",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    if (traffic == null) {
-                        "未导入订阅"
-                    } else {
-                        val total = if (traffic.totalBytes > 0) {
-                            Format.bytes(traffic.totalBytes)
-                        } else {
-                            "—"
-                        }
-                        "${Format.bytes(traffic.usedBytes)} / $total"
-                    },
-                    style = MaterialTheme.typography.bodyLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (traffic == null) {
-                TextButton(
-                    onClick = onOpenSubscriptions,
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                ) {
-                    Text("去导入", style = MaterialTheme.typography.labelLarge)
-                }
-            }
-        }
-        if (traffic != null) {
-            val tone = when {
-                traffic.usageFraction > 0.9f -> MaterialTheme.colorScheme.error
-                traffic.usageFraction > 0.7f -> LocalDaeGlassPalette.current.warning
-                else -> LocalDaeGlassPalette.current.success
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(8.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.60f)),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(traffic.usageFraction.coerceIn(0f, 1f))
-                        .height(8.dp)
-                        .clip(CircleShape)
-                        .background(tone),
-                )
-            }
-            if (traffic.expireAtEpochSeconds > 0) {
-                Text(
-                    "到期 ${Format.expiry(traffic.expireAtEpochSeconds)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        } else {
-            Text(
-                "导入订阅后可在这里查看用量和到期时间。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
 private fun QuickActions(
     canTest: Boolean,
     onTest: () -> Unit,
     onLogs: () -> Unit,
     onDiagnose: () -> Unit,
-    onOpenTest: () -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -793,12 +1107,6 @@ private fun QuickActions(
             icon = Icons.Outlined.MonitorHeart,
             label = "诊断",
             onClick = onDiagnose,
-            modifier = Modifier.weight(1f),
-        )
-        GlassAction(
-            icon = Icons.Outlined.Language,
-            label = "连通",
-            onClick = onOpenTest,
             modifier = Modifier.weight(1f),
         )
     }

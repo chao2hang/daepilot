@@ -146,11 +146,6 @@ class RootShell {
             }.getOrDefault(false)
         }
 
-    suspend fun readFile(path: String): String? = withContext(Dispatchers.IO) {
-        val result = run("cat ${quote(path)}")
-        if (result.ok) result.out else null
-    }
-
     suspend fun exists(path: String): Boolean =
         run("test -e ${quote(path)} && echo yes").out.trim() == "yes"
 
@@ -166,9 +161,5 @@ class RootShell {
                 )
             }
         }
-
-        /** Only allow simple package names / shell words in rendered config. */
-        fun isSafeToken(value: String): Boolean =
-            value.isNotEmpty() && value.all { it.isLetterOrDigit() || it in "._-:" }
     }
 }

@@ -1,1 +1,7 @@
-allow magiskdomain self:bpf { map_create map_read map_write prog_load prog_run }
+# MagiskPolicy statements use space-separated class names; `self:bpf` is not
+# valid here and silently left dae without these grants. Magisk already grants
+# most of them, but keep the rule explicit for policy changes.
+# Note: pname routing additionally needs dae's cgroup sock_create hook. On
+# ROMs where netd's cgroupsock_inet already owns that cgroup attach type, the
+# kernel rejects the second attach and no SELinux rule can change that.
+allow magisk magisk bpf { map_create map_read map_write prog_load prog_run }

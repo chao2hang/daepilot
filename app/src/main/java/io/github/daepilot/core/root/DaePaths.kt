@@ -18,6 +18,7 @@ object DaePaths {
     const val RUN = "$BASE/run"
     const val PID = "$RUN/dae.pid"
     const val DNS_SERVERS = "$RUN/dns.servers"
+    const val BYPASS_UIDS = "$RUN/bypass_uids"
     const val WATCHDOG_PID = "$RUN/watchdog.pid"
     const val ENABLED = "$BASE/enabled"
     const val VERSION = "$BASE/bin/VERSION"

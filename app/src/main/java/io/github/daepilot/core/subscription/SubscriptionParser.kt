@@ -184,6 +184,7 @@ object SubscriptionParser {
                     sni = map.str("servername") ?: map.str("sni"),
                     alpn = map.stringList("alpn"),
                     fingerprint = map.str("client-fingerprint"),
+                    allowInsecure = map.bool("skip-cert-verify") == true,
                 )
             }
             "vless" -> {
@@ -343,6 +344,7 @@ object SubscriptionParser {
                     sni = sni,
                     alpn = alpn,
                     fingerprint = utlsFp,
+                    allowInsecure = insecure,
                 )
             }
             "vless" -> {

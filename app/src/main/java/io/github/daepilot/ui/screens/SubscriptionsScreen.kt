@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ContentPaste
@@ -27,6 +28,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -37,12 +39,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.daepilot.core.model.AppSnapshot
 import io.github.daepilot.core.model.Subscription
 import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.Format
+import io.github.daepilot.ui.SubscriptionPreviewUiState
 import io.github.daepilot.ui.components.ConfirmDialog
 import io.github.daepilot.ui.components.EmptyState
 import io.github.daepilot.ui.components.ScreenBottom
@@ -60,6 +65,7 @@ fun SubscriptionsScreen(
     var showAdd by remember { mutableStateOf(false) }
     var showImport by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<Subscription?>(null) }
+    val preview by viewModel.subscriptionPreview.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -126,10 +132,17 @@ fun SubscriptionsScreen(
 
     if (showAdd) {
         AddSubscriptionDialog(
-            onDismiss = { showAdd = false },
+            preview = preview,
+            onPreview = viewModel::previewSubscription,
+            onClearPreview = viewModel::clearSubscriptionPreview,
+            onDismiss = {
+                showAdd = false
+                viewModel.clearSubscriptionPreview()
+            },
             onConfirm = { name, url ->
                 viewModel.addSubscription(name, url)
                 showAdd = false
+                viewModel.clearSubscriptionPreview()
             },
         )
     }
@@ -244,12 +257,18 @@ private fun SubscriptionCard(
 
 @Composable
 private fun AddSubscriptionDialog(
+    preview: SubscriptionPreviewUiState,
+    onPreview: (String) -> Unit,
+    onClearPreview: () -> Unit,
     onDismiss: () -> Unit,
     onConfirm: (name: String, url: String) -> Unit,
 ) {
     var name by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    val trimmed = url.trim()
+    val result = preview.preview?.takeIf { preview.url == trimmed }
+    val canAdd = result?.ok == true
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -269,6 +288,7 @@ private fun AddSubscriptionDialog(
                     onValueChange = {
                         url = it
                         error = null
+                        onClearPreview()
                     },
                     label = { Text("订阅 URL") },
                     placeholder = { Text("https://…") },
@@ -278,18 +298,92 @@ private fun AddSubscriptionDialog(
                     isError = error != null,
                     supportingText = error?.let { { Text(it) } },
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (preview.running) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "正在获取…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(
+                        onClick = {
+                            if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+                                error = "请输入 http(s) 订阅链接"
+                            } else {
+                                onPreview(trimmed)
+                            }
+                        },
+                        enabled = trimmed.isNotBlank() && !preview.running,
+                    ) { Text(if (result == null) "预览节点" else "重新预览") }
+                }
+                when {
+                    result == null && !preview.running -> Text(
+                        "添加前请先预览，确认节点数量和格式。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    result != null -> Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (result.ok) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                        } else {
+                            MaterialTheme.colorScheme.error.copy(alpha = 0.10f)
+                        },
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                result.message,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (result.ok) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.error
+                                },
+                            )
+                            if (result.ok) {
+                                Text(
+                                    "格式：${result.format.ifBlank { "未知" }}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            result.warnings.take(2).forEach { warning ->
+                                Text(
+                                    warning,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    val trimmed = url.trim()
-                    if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-                        error = "请输入 http(s) 订阅链接"
+                    if (!canAdd) {
+                        error = "请先预览订阅"
                     } else {
                         onConfirm(name.trim(), trimmed)
                     }
                 },
+                enabled = canAdd,
             ) { Text("添加") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
@@ -301,9 +395,24 @@ private fun ImportLinksDialog(
     onDismiss: () -> Unit,
     onConfirm: (prefix: String, text: String) -> Unit,
 ) {
+    val clipboard = LocalClipboardManager.current
     var prefix by remember { mutableStateOf("") }
-    var text by remember { mutableStateOf("") }
+    var text by remember {
+        val clip = runCatching { clipboard.getText()?.text?.trim() }.getOrNull().orEmpty()
+        mutableStateOf(if (looksLikeNodePayload(clip)) clip else "")
+    }
+    var fromClipboard by remember { mutableStateOf(text.isNotBlank()) }
     var error by remember { mutableStateOf<String?>(null) }
+    val readClipboard = {
+        val clip = runCatching { clipboard.getText()?.text?.trim() }.getOrNull().orEmpty()
+        if (clip.isBlank()) {
+            error = "剪贴板为空"
+        } else {
+            text = clip
+            fromClipboard = true
+            error = null
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -318,6 +427,18 @@ private fun ImportLinksDialog(
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.small,
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (fromClipboard) "已从剪贴板填入，重复节点会自动跳过" else "重复节点会自动跳过",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = readClipboard) { Text("读取剪贴板") }
+                }
                 OutlinedTextField(
                     value = text,
                     onValueChange = {
@@ -345,6 +466,13 @@ private fun ImportLinksDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
+
+private fun looksLikeNodePayload(text: String): Boolean =
+    text.contains("://") ||
+        text.contains("proxies:", ignoreCase = true) ||
+        text.contains("outbounds", ignoreCase = true) ||
+        (text.startsWith("{") && text.contains("password", ignoreCase = true))
+
 
 private fun hostOf(url: String): String =
     runCatching { java.net.URI(url).host }.getOrNull()?.takeIf { it.isNotBlank() }

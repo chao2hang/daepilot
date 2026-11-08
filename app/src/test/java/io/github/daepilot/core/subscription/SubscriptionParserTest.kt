@@ -72,8 +72,27 @@ class SubscriptionParserTest {
     }
 
     @Test
-    fun parsesSingBoxOutbounds() {
-        val json = """
+    fun clashVmessKeepsSkipCertVerify() {
+        val yaml = """
+            proxies:
+              - name: hk
+                type: vmess
+                server: example.com
+                port: 443
+                uuid: 11111111-1111-1111-1111-111111111111
+                tls: true
+                skip-cert-verify: true
+        """.trimIndent()
+        val node = SubscriptionParser.parse(yaml.toByteArray()).nodes.single()
+        assertEquals(NodeProtocol.VMESS, node.protocol)
+        val json = requireNotNull(
+            ShareLink.decodeBase64Lenient(node.link.substringAfter("://").substringBefore('#')),
+        )
+        assertTrue(json.contains("\"allowInsecure\":true"))
+    }
+
+    @Test
+    fun parsesSingBoxOutbounds() {        val json = """
             {
               "outbounds": [
                 {"type": "direct", "tag": "direct"},

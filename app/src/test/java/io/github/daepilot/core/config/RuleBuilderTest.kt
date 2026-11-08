@@ -152,6 +152,41 @@ class RuleBuilderTest {
     }
 
     @Test
+    fun `appends an optional port condition`() {
+        val result = RuleBuilder.build(
+            RuleDraft(
+                kind = RuleKind.DOMAIN,
+                domain = "openai.com",
+                portFilter = "443, 1000-2000",
+            ),
+        )
+        assertEquals(
+            "domain(suffix: openai.com) && dport(443, 1000-2000)",
+            result.expression,
+        )
+        assertNotNull(
+            RuleBuilder.build(
+                RuleDraft(RuleKind.DOMAIN, domain = "openai.com", portFilter = "70000"),
+            ).error,
+        )
+    }
+
+    @Test
+    fun `round trips a rule with a port condition`() {
+        val expression = "domain(geosite:openai) && dport(443)"
+        val draft = RuleBuilder.parse(expression)
+        assertNotNull(draft)
+        assertEquals("443", draft!!.portFilter)
+        assertEquals(expression, RuleBuilder.build(draft).expression)
+        assertEquals("域名清单 · openai · 端口 443", RuleBuilder.describe(expression))
+    }
+
+    @Test
+    fun `does not treat a negated port as the guided suffix`() {
+        assertNull(RuleBuilder.parse("domain(geosite:openai) && !dport(443)"))
+    }
+
+    @Test
     fun `converts unicode domains to punycode`() {
         assertEquals(
             "domain(suffix: xn--fsqu00a.xn--55qx5d)",

@@ -54,6 +54,7 @@ fun NodeEntity.toModel(): Node = Node(
     favorite = favorite,
     createdAt = createdAt,
     countryCode = countryCode,
+    skipCertVerify = skipCertVerify,
 )
 
 fun Node.toEntity(): NodeEntity = NodeEntity(
@@ -67,4 +68,5 @@ fun Node.toEntity(): NodeEntity = NodeEntity(
     favorite = favorite,
     createdAt = createdAt,
     countryCode = countryCode,
+    skipCertVerify = skipCertVerify,
 )

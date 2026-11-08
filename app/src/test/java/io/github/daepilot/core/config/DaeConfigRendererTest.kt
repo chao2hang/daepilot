@@ -31,6 +31,23 @@ class DaeConfigRendererTest {
     }
 
     @Test
+    fun perNodeSkipCertVerifyOnlyRelaxesThatNode() {
+        val insecure = hk.copy(skipCertVerify = true)
+        val config = render(RenderSpec(nodes = listOf(insecure, jp)))
+        // The global switch must stay closed; only the marked node carries the
+        // per-node override.
+        assertTrue(config.contains("  allow_insecure: false\n"))
+        assertTrue(
+            config.contains(
+                "id_01: 'vless://uuid@1.2.3.4:443?type=tcp&allowInsecure=1#id_01'",
+            ),
+        )
+        assertTrue(
+            config.contains("id_01_n2: 'trojan://pw@example.com:443#id_01_n2'"),
+        )
+    }
+
+    @Test
     fun selectedNodeUsesFixedPolicyOnItsDisplayName() {
         val config = render(RenderSpec(nodes = listOf(hk, jp), selectedNodeId = "n1"))
         assertTrue(
@@ -84,6 +101,81 @@ class DaeConfigRendererTest {
     }
 
     @Test
+    fun defaultGroupDrivesProxyAndKeepsItsOwnDefinition() {
+        val group = OutboundGroup(
+            id = "g1",
+            name = "香港组",
+            key = "hk",
+            policy = GroupPolicy.MIN_MOVING_AVG,
+            nodeIds = listOf("n1"),
+        )
+        val config = render(
+            RenderSpec(
+                nodes = listOf(hk, jp),
+                groups = listOf(group),
+                defaultGroupId = "g1",
+            ),
+        )
+        assertTrue(
+            config.contains(
+                """
+                group {
+                  proxy {
+                    filter: name('id_01')
+                    policy: min_moving_avg
+                  }
+                  hk {
+                    filter: name('id_01')
+                    policy: min_moving_avg
+                  }
+                }
+                """.trimIndent(),
+            ),
+        )
+        assertTrue(config.contains("fallback: proxy"))
+    }
+
+    @Test
+    fun ruleCanTargetGroupKey() {
+        val group = OutboundGroup(id = "g1", name = "香港组", key = "hk", nodeIds = listOf("n1"))
+        val config = render(
+            RenderSpec(
+                nodes = listOf(hk),
+                groups = listOf(group),
+                customRules = listOf(RoutingRule("r1", "domain(telegram.org)", "hk")),
+            ),
+        )
+        assertTrue(config.contains("domain(telegram.org) -> hk"))
+    }
+
+    @Test
+    fun legacyRuleTargetingDisplayNameResolvesToGroupKey() {
+        val group = OutboundGroup(id = "g1", name = "香港组", key = "hk", nodeIds = listOf("n1"))
+        val config = render(
+            RenderSpec(
+                nodes = listOf(hk),
+                groups = listOf(group),
+                customRules = listOf(RoutingRule("r1", "domain(a.com)", "香港组")),
+            ),
+        )
+        assertTrue(config.contains("domain(a.com) -> hk"))
+    }
+
+    @Test
+    fun emptyDefaultGroupFallsBackToAllNodes() {
+        val group = OutboundGroup(id = "g1", name = "空组", key = "empty", nodeIds = emptyList())
+        val config = render(
+            RenderSpec(
+                nodes = listOf(hk, jp),
+                groups = listOf(group),
+                defaultGroupId = "g1",
+            ),
+        )
+        assertTrue(config.contains("  proxy {\n    policy: min_moving_avg\n  }"))
+        assertFalse(config.contains("  empty {"))
+    }
+
+    @Test
     fun routingRulesAreValidatedAndUnknownOutboundsFallBackToDirect() {
         val rules = listOf(
             RoutingRule("r1", "domain(geosite:cn)", "proxy"),
@@ -126,8 +218,20 @@ class DaeConfigRendererTest {
 
     @Test
     fun udpCheckDnsCarriesPortsSoTheHealthCheckSurvivesParsing() {
+        // Default blocks IPv6, so health checks stay IPv4-only (a v6 check can
+        // never pass without a v6 route and only flaps node health).
         val config = render(RenderSpec(nodes = listOf(hk)))
+        assertTrue(config.contains("udp_check_dns: '8.8.8.8:53'"))
+        assertTrue(config.contains("tcp_check_url: 'http://cp.cloudflare.com,1.1.1.1'"))
+        assertFalse(config.contains("2001:4860:4860::8888"))
+        assertFalse(config.contains("2606:4700:4700::1111"))
+    }
+
+    @Test
+    fun healthChecksKeepIpv6WhenIpv6IsAllowed() {
+        val config = render(RenderSpec(nodes = listOf(hk), dns = DnsConfig(blockIpv6 = false)))
         assertTrue(config.contains("udp_check_dns: '8.8.8.8:53,[2001:4860:4860::8888]:53'"))
+        assertTrue(config.contains("tcp_check_url: 'http://cp.cloudflare.com,1.1.1.1,2606:4700:4700::1111'"))
     }
 
     @Test
@@ -139,6 +243,7 @@ class DaeConfigRendererTest {
             ),
         )
         assertTrue(config.contains("pname(com.example.app) -> must_direct"))
+        assertTrue(config.contains("dscp(0x2f) -> must_direct"))
         assertFalse(config.contains("bad name"))
     }
 
@@ -174,15 +279,92 @@ class DaeConfigRendererTest {
     }
 
     @Test
+    fun playDownloadHostsAreProxiedBeforeCnDirectRules() {
+        val group = OutboundGroup(
+            id = "g1",
+            name = "proxy",
+            key = "proxy",
+            nodeIds = listOf(hk.id),
+        )
+        val config = render(
+            RenderSpec(
+                nodes = listOf(hk),
+                groups = listOf(group),
+                template = RoutingTemplate.BYPASS_MAINLAND,
+            ),
+        )
+        val play = config.indexOf(
+            "domain(suffix: services.googleapis.cn, suffix: gvt1.com, " +
+                "suffix: gvt2.com, suffix: dl.google.com) -> proxy",
+        )
+        val cn = config.indexOf("domain(geosite:cn) -> direct")
+        assertTrue(play in 0 until cn)
+        assertTrue(DaeConfigValidator.quickCheckConfig(config).ok)
+    }
+
+    @Test
+    fun healthCheckIntervalScalesWithNodeCount() {
+        fun interval(nodes: List<Node>) = Regex("check_interval: (\\d+)s")
+            .find(render(RenderSpec(nodes = nodes)))!!
+            .groupValues[1]
+            .toInt()
+        assertEquals(30, interval(listOf(hk, jp)))
+        assertEquals(60, interval(List(12) { node("n$it", "n$it", "vless://u@1.2.3.$it:443") }))
+        assertEquals(90, interval(List(25) { node("m$it", "m$it", "vless://u@1.2.3.$it:443") }))
+    }
+
+    @Test
+    fun nodeDomainsResolveThroughDomesticDnsWithoutTheTunnel() {
+        val config = render(RenderSpec(nodes = listOf(hk, jp)))
+        val nodeRule = config.indexOf("qname(suffix: example.com) -> alidns")
+        val fallback = config.indexOf("fallback: googledns")
+        assertTrue(nodeRule in 0 until fallback)
+        assertFalse(config.contains("qname(suffix: 1.2.3.4)"))
+
+        val ipOnly = render(RenderSpec(nodes = listOf(hk)))
+        assertFalse(ipOnly.contains("qname(suffix:"))
+    }
+
+    @Test
     fun dnsUsesRequestAndResponseSections() {
         val config = render(RenderSpec(nodes = listOf(hk)))
-        assertTrue(config.contains("    request {\n      qname(geosite:cn) -> alidns\n      fallback: googledns\n    }"))
+        assertTrue(
+            config.contains(
+                "    request {\n" +
+                    "      qname(geosite:cn) -> alidns\n" +
+                    "      qtype(AAAA) && !qname(geosite:cn) -> reject\n" +
+                    "      fallback: googledns\n" +
+                    "    }",
+            ),
+        )
         assertTrue(config.contains("alidns: 'https://223.5.5.5/dns-query'"))
         assertTrue(config.contains("googledns: 'https://1.1.1.1/dns-query'"))
         assertTrue(config.contains("    response {\n      upstream(googledns) -> accept\n"))
+        assertTrue(config.contains("# daepilot:ipv6=block"))
 
         val noCn = render(RenderSpec(nodes = listOf(hk), dns = DnsConfig(useDomesticForCn = false)))
         assertFalse(noCn.contains("qname(geosite:cn) -> alidns"))
+    }
+
+    @Test
+    fun ipv6CanBeAllowedExplicitly() {
+        val config = render(RenderSpec(nodes = listOf(hk), dns = DnsConfig(blockIpv6 = false)))
+        assertFalse(config.contains("qtype(AAAA)"))
+        assertTrue(config.contains("# daepilot:ipv6=allow"))
+        assertFalse(config.contains("ipversion(6) -> block"))
+    }
+
+    @Test
+    fun blockedIpv6IsRejectedAfterCnDirectRules() {
+        val config = render(RenderSpec(nodes = listOf(hk), template = RoutingTemplate.BYPASS_MAINLAND))
+        assertTrue(config.contains("ipversion(6) -> block"))
+        // CN IPv6 must still match direct before the catch-all IPv6 block.
+        val cnIndex = config.indexOf("dip(geoip:cn) -> direct")
+        val blockIndex = config.indexOf("ipversion(6) -> block")
+        val fallbackIndex = config.indexOf("fallback: proxy")
+        assertTrue(cnIndex in 0 until blockIndex)
+        assertTrue(blockIndex in 0 until fallbackIndex)
+        assertTrue(DaeConfigValidator.quickCheckConfig(config).ok)
     }
 
     @Test

@@ -6,10 +6,12 @@ import io.github.daepilot.core.model.AppSettings
 import io.github.daepilot.core.model.DnsConfig
 import io.github.daepilot.core.model.Node
 import io.github.daepilot.core.model.OutboundGroup
+import io.github.daepilot.core.model.daeKey
 import io.github.daepilot.core.model.ParsedSubscription
 import io.github.daepilot.core.model.RenderSpec
 import io.github.daepilot.core.model.RoutingRule
 import io.github.daepilot.core.model.RoutingTemplate
+import io.github.daepilot.core.model.ShareLink
 import io.github.daepilot.core.model.Subscription
 import io.github.daepilot.core.model.UserConfig
 import io.github.daepilot.core.subscription.SubscriptionParser
@@ -38,6 +40,14 @@ data class ImportResult(
     val format: String = "",
     val warnings: List<String> = emptyList(),
     val subscriptionId: String? = null,
+)
+
+data class SubscriptionPreview(
+    val ok: Boolean,
+    val message: String,
+    val nodeCount: Int = 0,
+    val format: String = "",
+    val warnings: List<String> = emptyList(),
 )
 
 class DaeRepository(
@@ -83,6 +93,7 @@ class DaeRepository(
         config: UserConfig,
     ): AppSnapshot {
         val selected = config.selectedNodeId?.takeIf { id -> nodeList.any { it.id == id } }
+        val defaultGroup = config.defaultGroupId?.takeIf { id -> config.groups.any { it.id == id } }
         return AppSnapshot(
             subscriptions = subs,
             nodes = nodeList,
@@ -90,6 +101,7 @@ class DaeRepository(
             rules = config.rules,
             template = config.template,
             selectedNodeId = selected,
+            defaultGroupId = defaultGroup,
             settings = config.settings,
             dns = config.dns,
         )
@@ -113,8 +125,54 @@ class DaeRepository(
         return result.copy(subscriptionId = subscription.id)
     }
 
-    suspend fun refreshSubscription(id: String, force: Boolean = false): ImportResult =
+    /** Fetches and parses a subscription without writing it to the database. */
+    suspend fun previewSubscription(url: String): SubscriptionPreview =
         withContext(Dispatchers.IO) {
+            val trimmed = url.trim()
+            if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+                return@withContext SubscriptionPreview(
+                    false,
+                    "订阅地址必须以 http:// 或 https:// 开头",
+                )
+            }
+            val fetch = try {
+                client.fetch(trimmed, null)
+            } catch (e: SubscriptionException) {
+                return@withContext SubscriptionPreview(false, "无法获取订阅：${e.message}")
+            } catch (e: Exception) {
+                return@withContext SubscriptionPreview(
+                    false,
+                    "无法获取订阅：${e.message ?: e.javaClass.simpleName}",
+                )
+            }
+            if (fetch.notModified) {
+                return@withContext SubscriptionPreview(false, "服务器返回 304，请重试")
+            }
+            val parsed = try {
+                SubscriptionParser.parse(fetch.body ?: ByteArray(0), null)
+            } catch (e: Exception) {
+                return@withContext SubscriptionPreview(
+                    false,
+                    "解析失败：${e.message ?: e.javaClass.simpleName}",
+                )
+            }
+            if (parsed.nodes.isEmpty()) {
+                return@withContext SubscriptionPreview(
+                    false,
+                    parsed.warnings.firstOrNull() ?: "订阅中没有可用节点",
+                    warnings = parsed.warnings,
+                )
+            }
+            SubscriptionPreview(
+                ok = true,
+                message = "可导入 ${parsed.nodes.size} 个节点",
+                nodeCount = parsed.nodes.size,
+                format = parsed.format,
+                warnings = parsed.warnings,
+            )
+        }
+
+    suspend fun refreshSubscription(id: String, force: Boolean = false): ImportResult =        withContext(Dispatchers.IO) {
             val entity = subscriptionDao.getById(id)
                 ?: return@withContext ImportResult(false, "订阅不存在")
             if (!entity.enabled && !force) {
@@ -184,6 +242,7 @@ class DaeRepository(
                     favorite = old?.favorite ?: false,
                     createdAt = old?.createdAt ?: now,
                     countryCode = old?.countryCode,
+                    skipCertVerify = old?.skipCertVerify ?: false,
                 )
             }
 
@@ -271,8 +330,29 @@ class DaeRepository(
                     warnings = parsed.warnings,
                 )
             }
+            val existing = nodeDao.getAll()
+                .map { ShareLink.canonicalize(it.link) }
+                .toSet()
+            val seen = HashSet<String>()
+            val fresh = parsed.nodes.filter { parsedNode ->
+                val key = ShareLink.canonicalize(parsedNode.link)
+                key !in existing && seen.add(key)
+            }
+            val skipped = parsed.nodes.size - fresh.size
+            if (fresh.isEmpty()) {
+                return@withContext ImportResult(
+                    true,
+                    if (parsed.nodes.size == 1) {
+                        "这个节点已经在节点库里了"
+                    } else {
+                        "没有新节点（${parsed.nodes.size} 个已存在）"
+                    },
+                    format = parsed.format,
+                    warnings = parsed.warnings,
+                )
+            }
             val now = System.currentTimeMillis()
-            val nodes = parsed.nodes.map { parsedNode ->
+            val nodes = fresh.map { parsedNode ->
                 Node(
                     id = DaeConfigRenderer.nodeId("local", parsedNode.link),
                     name = parsedNode.name,
@@ -285,7 +365,10 @@ class DaeRepository(
             nodeDao.upsertAll(nodes.map { it.toEntity() })
             ImportResult(
                 ok = true,
-                message = "已导入 ${nodes.size} 个本地节点",
+                message = buildString {
+                    append("已导入 ${nodes.size} 个本地节点")
+                    if (skipped > 0) append("，跳过 $skipped 个重复")
+                },
                 nodeCount = nodes.size,
                 format = parsed.format,
                 warnings = parsed.warnings,
@@ -301,7 +384,20 @@ class DaeRepository(
 
     suspend fun setFavorite(id: String, favorite: Boolean) = nodeDao.setFavorite(id, favorite)
 
-    suspend fun selectNode(id: String?) = settingsStore.update { it.copy(selectedNodeId = id) }
+    suspend fun setNodeSkipCertVerify(id: String, skip: Boolean) =
+        nodeDao.setSkipCertVerify(id, skip)
+
+    suspend fun selectNode(id: String?) = settingsStore.update {
+        it.copy(selectedNodeId = id, defaultGroupId = null)
+    }
+
+    suspend fun selectGroup(id: String) = settingsStore.update {
+        it.copy(defaultGroupId = id, selectedNodeId = null)
+    }
+
+    suspend fun selectAuto() = settingsStore.update {
+        it.copy(selectedNodeId = null, defaultGroupId = null)
+    }
 
     suspend fun migrateLegacyDns() = settingsStore.migrateLegacyDns()
 
@@ -324,19 +420,56 @@ class DaeRepository(
         config.copy(rules = config.rules.filterNot { it.id == id })
     }
 
+    suspend fun moveRule(id: String, offset: Int) = settingsStore.update { config ->
+        val index = config.rules.indexOfFirst { it.id == id }
+        if (index < 0) return@update config
+        val target = (index + offset).coerceIn(0, config.rules.lastIndex)
+        if (target == index) return@update config
+        val rules = config.rules.toMutableList()
+        val rule = rules.removeAt(index)
+        rules.add(target, rule)
+        config.copy(rules = rules)
+    }
+
+    suspend fun duplicateRule(id: String) = settingsStore.update { config ->
+        val index = config.rules.indexOfFirst { it.id == id }
+        if (index < 0) return@update config
+        val rules = config.rules.toMutableList()
+        rules.add(index + 1, config.rules[index].copy(id = UUID.randomUUID().toString()))
+        config.copy(rules = rules)
+    }
+
     suspend fun setRuleEnabled(id: String, enabled: Boolean) = settingsStore.update { config ->
         config.copy(rules = config.rules.map { if (it.id == id) it.copy(enabled = enabled) else it })
     }
 
     suspend fun upsertGroup(group: OutboundGroup) = settingsStore.update { config ->
-        val existing = config.groups.indexOfFirst { it.id == group.id }
+        val incoming = group.withStableKey(config.groups)
+        val existing = config.groups.indexOfFirst { it.id == incoming.id }
         val groups = config.groups.toMutableList()
-        if (existing >= 0) groups[existing] = group else groups += group
+        if (existing >= 0) groups[existing] = incoming else groups += incoming
         config.copy(groups = groups)
     }
 
     suspend fun deleteGroup(id: String) = settingsStore.update { config ->
-        config.copy(groups = config.groups.filterNot { it.id == id })
+        config.copy(
+            groups = config.groups.filterNot { it.id == id },
+            defaultGroupId = config.defaultGroupId?.takeIf { it != id },
+        )
+    }
+
+    /** Assigns the dae identifier once so renaming the display name cannot break rules. */
+    private fun OutboundGroup.withStableKey(existing: List<OutboundGroup>): OutboundGroup {
+        if (key.isNotBlank()) return this
+        val base = daeKey()
+        val used = existing.filter { it.id != id }.map { it.daeKey() }.toSet()
+        var candidate = base
+        var suffix = 2
+        while (candidate in used) {
+            candidate = "${base}_$suffix"
+            suffix++
+        }
+        return copy(key = candidate)
     }
 
     suspend fun testAllNodes(): List<LatencyResult> = withContext(Dispatchers.IO) {
@@ -375,10 +508,14 @@ class DaeRepository(
             .filter { it.subscriptionId == null || it.subscriptionId !in disabledSubscriptions }
             .sortedWith(compareByDescending<Node> { it.favorite }.thenBy { it.name.lowercase() })
         val selected = snapshot.selectedNodeId?.takeIf { id -> renderNodes.any { it.id == id } }
+        val defaultGroupId = snapshot.defaultGroupId?.takeIf { id ->
+            snapshot.groups.any { it.id == id && it.enabled }
+        }
         return RenderSpec(
             nodes = renderNodes,
             groups = snapshot.groups,
             selectedNodeId = selected,
+            defaultGroupId = defaultGroupId,
             template = snapshot.template,
             customRules = snapshot.rules,
             dns = snapshot.dns,

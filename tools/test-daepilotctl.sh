@@ -76,7 +76,9 @@ case "$cmd" in
     export DAEPILOT_TEST_ROOT
     exec "$root$guest" "$@" ;;
   setsid)
-    exec "$@" ;;
+    # The ctl's shebang is /system/bin/sh, which does not exist on the host,
+    # so run scripts through the host sh instead of exec'ing them directly.
+    exec sh "$@" ;;
   unshare)
     # Drop the only flag the ctl uses; run the re-executed ctl directly.
     [ "$1" = "-m" ] && shift
@@ -215,9 +217,30 @@ fi
 exit 0
 EOF
 
+cat > "$WORK/fakebin/iptables" <<EOF
+#!/bin/sh
+printf 'iptables %s\n' "\$*" >> "$WORK/iptables.log"
+case "\$*" in
+  *"-S daepilot_bypass"*)
+    printf '%s\n' '-A daepilot_bypass -m owner --uid-owner 10123 -j DSCP --set-dscp 0x2f'
+    printf '%s\n' '-A daepilot_bypass -m owner --uid-owner 2000 -j DSCP --set-dscp 0x2f'
+    exit 0 ;;
+  *"-C OUTPUT"*) exit 1 ;;
+esac
+exit 0
+EOF
+
+cat > "$WORK/fakebin/curl" <<EOF
+#!/bin/sh
+# Warmup probe interceptor: record the call, succeed unless told to fail.
+printf 'curl %s\n' "\$*" >> "$WORK/curl.log"
+if [ "\${FAKE_CURL_FAIL:-0}" = "1" ]; then exit 28; fi
+exit 0
+EOF
+
 chmod 755 "$WORK/fakebin/chroot" "$WORK/fakebin/busybox" "$WORK/fakebin/getprop" \
   "$WORK/fakebin/ip" "$WORK/fakebin/mount" "$WORK/fakebin/mountpoint" "$WORK/fakebin/ping" \
-  "$WORK/fakebin/dumpsys"
+  "$WORK/fakebin/dumpsys" "$WORK/fakebin/iptables" "$WORK/fakebin/curl"
 
 # --- per-test fixtures ----------------------------------------------------
 
@@ -310,6 +333,7 @@ run_ctl() { # $@ = ctl args; stdout is the ctl stdout, stderr -> $WORK/stderr.tx
     export FAKE_VPN="${FAKE_VPN:-}"
     export FAKE_IPV6="${FAKE_IPV6:-}"
     export FAKE_DUMPSYS="${FAKE_DUMPSYS:-}"
+    export FAKE_CURL_FAIL="${FAKE_CURL_FAIL:-}"
     sh "$CTL_UNDER_TEST" "$@" 2>"$WORK/stderr.txt"
   )
 }
@@ -740,6 +764,65 @@ assert_contains "$BASE/rootfs/config/config.dae" "qtype(AAAA) && !qname(geosite:
 FAKE_MOBILE=""
 FAKE_DUMPSYS=""
 
+# 17d. The app can explicitly allow IPv6; the legacy AAAA injection must not
+#      override that choice and the marker must survive staging.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_DUMPSYS=1
+cat > "$BASE/staging/config.dae" <<'EOF'
+# daepilot:ipv6=allow
+global {
+  wan_interface: auto
+}
+dns {
+  upstream {
+    alidns: 'https://223.5.5.5/dns-query'
+    googledns: 'https://1.1.1.1/dns-query'
+  }
+  routing {
+    request {
+      qname(geosite:cn) -> alidns
+      fallback: googledns
+    }
+  }
+}
+node {
+  a: 'trojan://pw@a.example:443#a'
+}
+group {
+  proxy {
+    filter: name('a')
+    policy: fixed(0)
+  }
+}
+routing {
+  fallback: proxy
+}
+EOF
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "apply with explicit IPv6 allow succeeds"
+assert_not_contains "$BASE/rootfs/config/config.dae" "qtype(AAAA)" \
+  "explicit IPv6 allow is not overwritten by the legacy AAAA block"
+assert_contains "$BASE/rootfs/config/config.dae" "# daepilot:ipv6=allow" \
+  "IPv6 allow marker survives staging"
+FAKE_MOBILE=""
+FAKE_DUMPSYS=""
+
+# 17e. UID bypass: the app writes bypass_uids; ctl builds a DSCP mark chain.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+mkdir -p "$BASE/run"
+printf '10123\n2000\n' > "$BASE/run/bypass_uids"
+: > "$WORK/iptables.log"
+out="$(run_ctl bypass)"; rc=$?
+assert_eq "$rc" "0" "bypass command succeeds"
+assert_contains "$WORK/iptables.log" "uid-owner 10123 -j DSCP --set-dscp 0x2f" \
+  "first bypass UID is DSCP-marked"
+assert_contains "$WORK/iptables.log" "uid-owner 2000 -j DSCP --set-dscp 0x2f" \
+  "second bypass UID is DSCP-marked"
+assert_contains "$WORK/iptables.log" "OUTPUT 1 -j daepilot_bypass" \
+  "bypass chain is inserted into mangle OUTPUT"
+
 # 8. The chroot must live in a private mount namespace and never unmount
 #    host-visible mounts (the /dev/binderfs regression).
 assert_contains "$CTL_SRC" "exec_in_private_ns" "ctl has the private-mount-namespace entry point"
@@ -748,6 +831,78 @@ assert_not_contains "$CTL_SRC" "cleanup_mounts" "ctl no longer unmounts host-vis
 assert_not_contains "$CTL_SRC" "umount -l" "ctl does not lazy-unmount anything"
 assert_not_contains "$CTL_SRC" "grep -l -a" "ctl avoids toybox-incompatible grep flags"
 assert_contains "$CTL_SRC" "ps -A -o PID,ARGS" "ctl discovers processes through ps"
+assert_contains "$CTL_SRC" 'validate_file_ready "$CONF"' \
+  "start validates without re-preparing the chroot"
+assert_contains "$CTL_SRC" "config.validated" "unchanged config skips dae validate"
+assert_contains "$CTL_SRC" "warmup_proxy_async" "start warms the proxy path in the background"
+assert_contains "$CTL_SRC" 'mkdir "$WATCH_LOCK"' "watchdog start is serialized by an atomic lock"
+
+# ==========================================================================
+# 18. Cold start warms the proxy DNS path so the first app lookups do not race
+#     the cold QUIC session (the startup SERVFAIL storm). A dead node must not
+#     block boot: the warmup is bounded and non-fatal.
+WARMUP_CONF='global {
+  wan_interface: auto
+}
+node {
+  a: '\''trojan://pw@203.0.113.7:443#a'\''
+}
+group {
+  proxy {
+    filter: name('\''a'\'')
+    policy: fixed(0)
+  }
+}
+routing {
+  fallback: proxy
+}'
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf '%s\n' "$WARMUP_CONF" > "$BASE/staging/config.dae"
+: > "$WORK/curl.log"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "warmup: apply config succeeds"
+out="$(run_ctl start)"; rc=$?
+assert_eq "$rc" "0" "warmup: start succeeds"
+# The probe runs detached because it may block for seconds on a slow node;
+# start must return first, then the probe must still happen.
+i=0
+while [ "$i" -lt 50 ] && ! grep -q 'generate_204' "$WORK/curl.log" 2>/dev/null; do
+  sleep 0.1
+  i=$((i + 1))
+done
+assert_contains "$WORK/curl.log" "https://www.google.com/generate_204" \
+  "warmup: start probes the proxy path in the background"
+case "$out" in
+  *"proxy path warmed up"*) fail_test "warmup: start must not wait for the probe" ;;
+  *) pass "warmup: start returns before the probe finishes" ;;
+esac
+run_ctl stop >/dev/null 2>&1
+
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf '%s\n' "$WARMUP_CONF" > "$BASE/staging/config.dae"
+: > "$WORK/curl.log"
+run_ctl apply "$BASE/staging/config.dae" >/dev/null 2>&1
+FAKE_CURL_FAIL=1
+out="$(run_ctl start)"; rc=$?
+assert_eq "$rc" "0" "warmup: a dead node does not block boot"
+i=0
+while [ "$i" -lt 80 ]; do
+  curl_calls="$(grep -c 'generate_204' "$WORK/curl.log" 2>/dev/null)"
+  [ "$curl_calls" -ge 2 ] && break
+  sleep 0.1
+  i=$((i + 1))
+done
+curl_calls="$(grep -c 'generate_204' "$WORK/curl.log" 2>/dev/null)"
+assert_eq "$curl_calls" "2" "warmup: retries are bounded to two attempts"
+out="$(run_ctl __warmup)"
+FAKE_CURL_FAIL=""
+case "$out" in
+  *"proxy path warmed up"*) fail_test "warmup: failed probe is not reported as warmed" ;;
+  *) pass "warmup: failed probe is not reported as warmed" ;;
+esac
+run_ctl stop >/dev/null 2>&1
 
 # ==========================================================================
 if [ "$FAILED" -eq 0 ]; then

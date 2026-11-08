@@ -46,9 +46,21 @@ data class Node(
     val favorite: Boolean = false,
     val createdAt: Long = 0L,
     val countryCode: String? = null,
+    /**
+     * Per-node TLS trust override for self-signed subscription servers.
+     * dae keeps `global.allow_insecure: false`; this only relaxes the
+     * certificate check when the link is rendered into config.dae.
+     */
+    val skipCertVerify: Boolean = false,
 ) {
     /** Host used for the proxy-loop bypass rule and direct latency probes. */
     val endpoint: ShareEndpoint? get() = ShareEndpoint.parse(link)
+}
+
+/** The node's own remark; the stored name may carry the subscription prefix. */
+fun Node.displayName(subscriptionName: String? = null): String {
+    val base = ShareLink.name(link)?.takeIf { it.isNotBlank() } ?: name
+    return if (subscriptionName != null) base.removePrefix("$subscriptionName · ") else base
 }
 
 /** Host/port of a node's server, extracted without trusting display names. */
@@ -95,11 +107,25 @@ data class Subscription(
 data class OutboundGroup(
     val id: String,
     val name: String,
+    /** Stable ASCII identifier used in config and rule targets; survives renames. */
+    val key: String = "",
     val policy: GroupPolicy = GroupPolicy.MIN_MOVING_AVG,
     val nodeIds: List<String> = emptyList(),
     val enabled: Boolean = true,
     val builtIn: Boolean = false,
 )
+
+/** dae identifier for the group; Chinese display names fall back to a stable id. */
+fun OutboundGroup.daeKey(): String {
+    val explicit = key.trim()
+    if (explicit.isNotEmpty()) return explicit
+    val ascii = name.map { c -> if (c.isLetterOrDigit() && c.code < 128) c else '_' }
+        .joinToString("")
+        .trim('_')
+    if (ascii.isNotEmpty()) return if (ascii.first().isDigit()) "id_$ascii" else ascii
+    val idPart = id.filter { it.isLetterOrDigit() }.take(8)
+    return "group_" + idPart.ifBlank { "x" }
+}
 
 enum class GroupPolicy(val daeValue: String, val label: String) {
     MIN_MOVING_AVG("min_moving_avg", "最低移动平均延迟"),
@@ -138,6 +164,9 @@ data class DnsConfig(
     // reliable path for foreign names.
     val foreignUpstream: String = DEFAULT_FOREIGN_UPSTREAM,
     val useDomesticForCn: Boolean = true,
+    // IPv4-only proxies hang on Chrome's AAAA attempts; dropping AAAA for
+    // proxied names keeps browsing stable while CN IPv6 stays direct.
+    val blockIpv6: Boolean = true,
 ) {
     companion object {
         const val DEFAULT_DOMESTIC_UPSTREAM = "https://223.5.5.5/dns-query"
@@ -153,6 +182,8 @@ data class RenderSpec(
     val nodes: List<Node>,
     val groups: List<OutboundGroup> = emptyList(),
     val selectedNodeId: String? = null,
+    /** When set, this group is the default outbound and wins over [selectedNodeId]. */
+    val defaultGroupId: String? = null,
     val template: RoutingTemplate = RoutingTemplate.BYPASS_MAINLAND,
     val customRules: List<RoutingRule> = emptyList(),
     val dns: DnsConfig = DnsConfig(),
@@ -181,6 +212,7 @@ data class DaemonStatus(
     val lastError: String? = null,
     val mode: String = "unknown",
     val rssKb: Long = 0L,
+    val cpuPercent: Double? = null,
     val bootEnabled: Boolean = false,
     val watchdog: Boolean = false,
     val desiredRunning: Boolean = false,
@@ -190,6 +222,7 @@ data class DaemonStatus(
     val dns: String? = null,
     val dnsMode: String? = null,
     val ipv6Mode: String? = null,
+    val pnameRouting: Boolean? = null,
 )
 
 @Serializable
@@ -240,6 +273,7 @@ data class AppSnapshot(
     val rules: List<RoutingRule> = emptyList(),
     val template: RoutingTemplate = RoutingTemplate.BYPASS_MAINLAND,
     val selectedNodeId: String? = null,
+    val defaultGroupId: String? = null,
     val settings: AppSettings = AppSettings(),
     val dns: DnsConfig = DnsConfig(),
 )
@@ -252,6 +286,7 @@ data class UserConfig(
     val rules: List<RoutingRule> = emptyList(),
     val template: RoutingTemplate = RoutingTemplate.BYPASS_MAINLAND,
     val selectedNodeId: String? = null,
+    val defaultGroupId: String? = null,
     val dns: DnsConfig = DnsConfig(),
 )
 

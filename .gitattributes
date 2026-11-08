@@ -5,3 +5,6 @@
 magisk/payload/bin/daepilotctl text eol=lf
 magisk/payload/bin/VERSION text eol=lf
 magisk/META-INF/** text eol=lf
+
+# Generated module bundle: 17 MB per rebuild would otherwise bloat every commit.
+app/src/main/assets/daepilot-module.zip filter=lfs diff=lfs merge=lfs -text

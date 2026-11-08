@@ -86,6 +86,36 @@ class ShareLinkTest {
     }
 
     @Test
+    fun readsVmessRemarkFromPsWhenNoFragment() {
+        val link = ProxyUriFactory.vmess(
+            server = "hk1.example.com",
+            port = 8443,
+            uuid = "uuid",
+            name = "🇭🇰 香港1 (部分移动)",
+        ).substringBefore('#')
+        assertEquals("🇭🇰 香港1 (部分移动)", ShareLink.name(link))
+    }
+
+    @Test
+    fun vmessFragmentTakesPrecedenceOverPs() {
+        val base = ProxyUriFactory.vmess(
+            server = "example.com",
+            port = 443,
+            uuid = "uuid",
+            name = "内部备注",
+        ).substringBefore('#')
+        assertEquals("外部备注", ShareLink.name(base + "#" + ShareLink.urlEncode("外部备注")))
+    }
+
+    @Test
+    fun decodesJsonUnicodeEscapesInVmessRemark() {
+        val json = "{\"add\":\"example.com\",\"port\":\"443\",\"ps\":\"\\u9999\\u6e2f \\ud83c\\udded\\ud83c\\uddf0\"}"
+        val link = "vmess://" + java.util.Base64.getEncoder()
+            .encodeToString(json.toByteArray(Charsets.UTF_8))
+        assertEquals("香港 🇭🇰", ShareLink.name(link))
+    }
+
+    @Test
     fun renamesLinkFragment() {
         val renamed = ShareLink.withName("vless://uuid@example.com:443?type=tcp#old", "HK_01")
         assertEquals("vless://uuid@example.com:443?type=tcp#HK_01", renamed)
@@ -109,6 +139,97 @@ class ShareLinkTest {
     @Test
     fun failsToRenameMalformedVmess() {
         assertNull(ShareLink.withName("vmess://not-base64", "x"))
+    }
+
+    @Test
+    fun insecureTlsAddsVmessJsonFlag() {
+        val link = ProxyUriFactory.vmess(
+            server = "example.com",
+            port = 443,
+            uuid = "uuid",
+            name = "香港 01",
+            tls = true,
+        )
+        val marked = ShareLink.withInsecureTls(link)
+        val json = requireNotNull(
+            ShareLink.decodeBase64Lenient(marked.substringAfter("://").substringBefore('#')),
+        )
+        assertTrue(json.contains("\"allowInsecure\":true"))
+        assertEquals("example.com", ShareLink.endpoint(marked)?.host)
+        assertEquals("香港 01", ShareLink.name(marked))
+    }
+
+    @Test
+    fun insecureTlsUsesTheProtocolSpecificQueryKey() {
+        assertEquals(
+            "vless://uuid@example.com:443?type=tcp&allowInsecure=1#HK",
+            ShareLink.withInsecureTls("vless://uuid@example.com:443?type=tcp#HK"),
+        )
+        assertEquals(
+            "trojan://pw@example.com:443?security=tls&allowInsecure=1",
+            ShareLink.withInsecureTls("trojan://pw@example.com:443?security=tls"),
+        )
+        assertTrue(
+            ShareLink.withInsecureTls("hysteria2://pw@example.com:443?sni=x#n")
+                .contains("insecure=1"),
+        )
+        assertTrue(
+            ShareLink.withInsecureTls("tuic://uuid:pw@example.com:443")
+                .contains("allow_insecure=1"),
+        )
+        assertTrue(
+            ShareLink.withInsecureTls("anytls://pw@example.com:443")
+                .contains("insecure=1"),
+        )
+    }
+
+    @Test
+    fun insecureTlsReplacesExistingFlagWithoutDuplicating() {
+        val marked = ShareLink.withInsecureTls(
+            "vless://uuid@example.com:443?allowInsecure=0&type=tcp#HK",
+        )
+        assertEquals(
+            "vless://uuid@example.com:443?type=tcp&allowInsecure=1#HK",
+            marked,
+        )
+    }
+
+    @Test
+    fun insecureTlsLeavesProtocolsWithoutTlsVerificationUntouched() {
+        val link = "ss://YWVzLTI1Ni1nY206cGFzcw==@1.1.1.1:8388#A"
+        assertEquals(link, ShareLink.withInsecureTls(link))
+    }
+
+    @Test
+    fun detectsTlsLinksAndTheirServerNames() {
+        val vmess = ProxyUriFactory.vmess(
+            server = "1.2.3.4",
+            port = 443,
+            uuid = "uuid",
+            name = "n",
+            tls = true,
+            sni = "s.example.com",
+        )
+        assertTrue(ShareLink.usesTls(vmess))
+        assertEquals("s.example.com", ShareLink.tlsServerName(vmess))
+
+        val noSni = ProxyUriFactory.vmess(
+            server = "example.com",
+            port = 443,
+            uuid = "uuid",
+            name = "n",
+            tls = true,
+        )
+        assertEquals("example.com", ShareLink.tlsServerName(noSni))
+
+        assertTrue(ShareLink.usesTls("vless://uuid@example.com:443?security=tls&sni=s.example.com"))
+        assertEquals(
+            "s.example.com",
+            ShareLink.tlsServerName("vless://uuid@example.com:443?security=tls&sni=s.example.com"),
+        )
+        assertTrue(ShareLink.usesTls("trojan://pw@example.com:443"))
+        assertFalse(ShareLink.usesTls("vless://uuid@example.com:443?security=none"))
+        assertFalse(ShareLink.usesTls("ss://YWVzLTI1Ni1nY206cGFzcw==@1.1.1.1:8388#A"))
     }
 
     @Test

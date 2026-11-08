@@ -57,4 +57,13 @@ class ConfigRedactorTest {
         assertFalse(out.contains(encoded))
         assertTrue(out.contains("ssr://<redacted>"))
     }
+
+    @Test
+    fun masksCredentialsInsideQuotedUpstreamUrls() {
+        val out = ConfigRedactor.redact(
+            "  upstream {\n    alidns: 'https://user:pass@dns.example/dns-query'\n  }",
+        )
+        assertFalse(out.contains("user:pass"))
+        assertTrue(out.contains("<redacted>@dns.example"))
+    }
 }

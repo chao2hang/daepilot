@@ -3,6 +3,7 @@ package io.github.daepilot.core.root
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
+import io.github.daepilot.core.config.DaeConfigRenderer
 import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +57,7 @@ class DaemonController(
             lastError = values["last_error"]?.takeIf { it.isNotBlank() },
             mode = values["mode"] ?: "chroot",
             rssKb = values["rss_kb"]?.toLongOrNull() ?: 0L,
+            cpuPercent = values["cpu_pct"]?.toDoubleOrNull(),
             bootEnabled = values["boot_enabled"] == "1",
             watchdog = values["watchdog"] == "1",
             desiredRunning = values["enabled"] == "1",
@@ -65,6 +67,11 @@ class DaemonController(
             dns = values["dns"]?.takeIf { it.isNotBlank() },
             dnsMode = values["dns_mode"]?.takeIf { it.isNotBlank() },
             ipv6Mode = values["ipv6_mode"]?.takeIf { it.isNotBlank() },
+            pnameRouting = when (values["pname"]) {
+                "1" -> true
+                "0" -> false
+                else -> null
+            },
         )
     }
 
@@ -96,6 +103,72 @@ class DaemonController(
                     if (result.ok) "配置已应用" else "配置应用失败"
                 }
                 ActionResult(result.ok, message)
+            }
+        }
+
+    /**
+     * Publishes the UIDs of the bypass packages so the module can mark their
+     * packets with [DaeConfigRenderer.BYPASS_DSCP]. This is the fallback for
+     * ROMs where dae's pname cgroup hook cannot attach.
+     */
+    suspend fun syncBypassUids(packages: List<String>): ActionResult =
+        withContext(Dispatchers.IO) {
+            controlled {
+                if (!root.isRootAvailable()) {
+                    return@controlled ActionResult(false, "未获得 root 权限")
+                }
+                if (!isModuleInstalled()) {
+                    return@controlled ActionResult(false, "尚未安装 DaePilot Magisk 模块")
+                }
+                val resolved = LinkedHashMap<String, Int>()
+                val pm = context.packageManager
+                for (pkg in packages) {
+                    runCatching { pm.getApplicationInfo(pkg, 0).uid }
+                        .getOrNull()
+                        ?.let { resolved[pkg] = it }
+                }
+                val missing = packages.filter { it !in resolved }
+                if (missing.isNotEmpty()) {
+                    val table = parsePackageUids(
+                        root.runLenient("pm list packages -U 2>/dev/null", 20_000).out,
+                    )
+                    missing.forEach { pkg -> table[pkg]?.let { resolved[pkg] = it } }
+                }
+                val stillMissing = packages.filter { it !in resolved }
+                for (pkg in stillMissing) {
+                    val out = root.runLenient(
+                        "dumpsys package ${RootShell.quote(pkg)} 2>/dev/null | " +
+                            "sed -n 's/.*userId=\\([0-9]*\\).*/\\1/p' | head -n 1",
+                        15_000,
+                    ).out.trim()
+                    out.lineSequence().firstOrNull()?.toIntOrNull()?.let { resolved[pkg] = it }
+                }
+                val unresolved = packages.filter { it !in resolved }
+                val uids = resolved.values.distinct().sorted()
+                val content = if (uids.isEmpty()) "" else uids.joinToString("\n", postfix = "\n")
+                if (!root.writeFile(DaePaths.BYPASS_UIDS, content, "600")) {
+                    return@controlled ActionResult(false, "无法写入分应用 UID 列表")
+                }
+                val applied = root.run("${DaePaths.CTL} bypass 2>&1", timeoutMs = 20_000)
+                val summary = buildString {
+                    if (uids.isEmpty()) {
+                        append("已清除分应用直连标记")
+                    } else {
+                        append("已为 ${uids.size} 个 UID 设置直连标记")
+                    }
+                    if (unresolved.isNotEmpty()) {
+                        append("；未找到：")
+                        append(unresolved.joinToString(", "))
+                    }
+                }
+                ActionResult(
+                    applied.ok,
+                    if (applied.ok) {
+                        summary
+                    } else {
+                        applied.out.ifBlank { applied.err }.trim().ifBlank { "应用分应用标记失败" }
+                    },
+                )
             }
         }
 
@@ -160,13 +233,6 @@ class DaemonController(
         }
     }
 
-    suspend fun watchdogRunning(): Boolean {
-        val out = root.runLenient(
-            "test -s ${DaePaths.WATCHDOG_PID} && kill -0 \$(cat ${DaePaths.WATCHDOG_PID}) 2>/dev/null && echo alive",
-        ).out
-        return out.contains("alive")
-    }
-
     private suspend fun runCtl(command: String, timeoutMs: Long = 30_000): ActionResult =
         controlled {
             if (!root.isRootAvailable()) return@controlled ActionResult(false, "未获得 root 权限")
@@ -215,6 +281,18 @@ class DaemonController(
             }
         }
         return servers.toList()
+    }
+
+    private fun parsePackageUids(output: String): Map<String, Int> {
+        val map = LinkedHashMap<String, Int>()
+        val packagePattern = Regex("""package:(\S+)""")
+        val uidPattern = Regex("""\buid:(\d+)\b""")
+        for (line in output.lineSequence()) {
+            val pkg = packagePattern.find(line)?.groupValues?.get(1) ?: continue
+            val uid = uidPattern.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: continue
+            map[pkg] = uid
+        }
+        return map
     }
 
     companion object {

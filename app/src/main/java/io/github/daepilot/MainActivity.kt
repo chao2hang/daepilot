@@ -1,6 +1,7 @@
 package io.github.daepilot
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -77,9 +78,9 @@ import dev.chrisbanes.haze.haze
 import dev.chrisbanes.haze.hazeChild
 import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.components.AmbientBackground
+import io.github.daepilot.ui.components.ConnectionBanner
 import io.github.daepilot.ui.screens.HomeScreen
 import io.github.daepilot.ui.screens.LogsScreen
-import io.github.daepilot.ui.screens.NetworkTestScreen
 import io.github.daepilot.ui.screens.NodesScreen
 import io.github.daepilot.ui.screens.RoutingScreen
 import io.github.daepilot.ui.screens.SettingsScreen
@@ -89,6 +90,11 @@ import io.github.daepilot.ui.theme.DaePilotTheme
 import io.github.daepilot.ui.theme.LocalDaeGlassPalette
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** Set by the island/notification action that re-reads the exit IP. */
+        const val EXTRA_REFRESH_EXIT = "extra_refresh_exit"
+    }
+
     private val viewModel: AppViewModel by viewModels {
         AppViewModel.Factory(application)
     }
@@ -111,7 +117,29 @@ class MainActivity : ComponentActivity() {
         }
         requestNotificationPermission()
         viewModel.ensureForegroundService()
-        viewModel.refreshStatus()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.onUiStarted()
+        intent?.let(::consumeRefreshIntent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumeRefreshIntent(intent)
+    }
+
+    private fun consumeRefreshIntent(intent: Intent) {
+        if (!intent.getBooleanExtra(EXTRA_REFRESH_EXIT, false)) return
+        intent.removeExtra(EXTRA_REFRESH_EXIT)
+        viewModel.refreshExit()
+    }
+
+    override fun onStop() {
+        viewModel.onUiStopped()
+        super.onStop()
     }
 
     private fun requestNotificationPermission() {
@@ -146,6 +174,7 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
     val navController = rememberNavController()
     val snapshot by viewModel.snapshot.collectAsStateWithLifecycle()
     val status by viewModel.status.collectAsStateWithLifecycle()
+    val connection by viewModel.connection.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val compatibility by viewModel.compatibility.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
@@ -188,13 +217,24 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
                     .haze(hazeState),
             ) {
                 AmbientBackground(mode = ambientMode)
-                NavHost(
-                    navController = navController,
-                    startDestination = "home",
+                Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .statusBarsPadding(),
                 ) {
+                    ConnectionBanner(
+                        state = connection,
+                        running = status.running,
+                        onRefresh = viewModel::refreshExit,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                    )
+                    NavHost(
+                        navController = navController,
+                        startDestination = "home",
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    ) {
                     composable("home") {
                         HomeScreen(
                             viewModel = viewModel,
@@ -205,10 +245,6 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
                             onOpenNodes = { navController.navigateToTab("nodes") },
                             onOpenLogs = openLogs,
                             onOpenSettings = { navController.navigateToTab("settings") },
-                            onOpenSubscriptions = { navController.navigateToTab("subscriptions") },
-                            onOpenTest = {
-                                navController.navigate("test") { launchSingleTop = true }
-                            },
                         )
                     }
                     composable("subscriptions") {
@@ -228,13 +264,6 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
                             onBack = { navController.popBackStack() },
                         )
                     }
-                    composable("test") {
-                        NetworkTestScreen(
-                            viewModel = viewModel,
-                            status = status,
-                            onBack = { navController.popBackStack() },
-                        )
-                    }
                     composable("settings") {
                         SettingsScreen(
                             viewModel = viewModel,
@@ -243,6 +272,7 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
                             compatibility = compatibility,
                             onOpenLogs = openLogs,
                         )
+                    }
                     }
                 }
             }

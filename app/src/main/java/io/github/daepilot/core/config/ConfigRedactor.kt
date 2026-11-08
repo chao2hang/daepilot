@@ -21,6 +21,9 @@ object ConfigRedactor {
         """(?i)(\b(?:password|passwd|pwd|auth|token|uuid|secret|psk|obfs-password)\s*:\s*['"])[^'"]*(['"])""",
     )
     private val userInfo = Regex("""^([a-zA-Z][a-zA-Z0-9+.-]*://)([^@/?#\s]+@)(.*)$""")
+    // Credentials also hide in quoted upstream URLs (DoH with basic auth), which
+    // are not node lines and therefore never reach redactLink.
+    private val inlineUserInfo = Regex("""([a-zA-Z][a-zA-Z0-9+.-]*://)([^@/?#\s'"]+@)""")
 
     fun redact(config: String, maxChars: Int = 150_000): String {
         val out = config.lineSequence().joinToString("\n") { line ->
@@ -51,6 +54,7 @@ object ConfigRedactor {
     private fun redactInline(line: String): String =
         line.replace(querySecret, "${'$'}1<redacted>")
             .replace(quotedSecret, "${'$'}1<redacted>${'$'}2")
+            .replace(inlineUserInfo) { "${it.groupValues[1]}<redacted>@" }
 
     private fun redactVmess(link: String): String {
         val body = link.removePrefix("vmess://").substringBefore('#')

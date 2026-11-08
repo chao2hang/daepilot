@@ -8,14 +8,16 @@ import android.os.IBinder
 import androidx.core.app.NotificationManagerCompat
 import io.github.daepilot.DaePilotApp
 import io.github.daepilot.data.AppContainer
+import io.github.daepilot.core.model.ConnectionState
 import io.github.daepilot.core.model.DaemonStatus
-import io.github.daepilot.core.root.RootRequestResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -30,13 +32,15 @@ class ControlService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var container: AppContainer
     private var pollJob: Job? = null
+    private var notificationJob: Job? = null
     private val notificationMutex = Mutex()
     private var lastNotifiedKey: String? = null
-    private var rootSessionChecked = false
+    private var lastOutboundKey: String = ""
 
     override fun onCreate() {
         super.onCreate()
         container = (application as DaePilotApp).container
+        container.controlServiceRunning.value = true
         val notification = NotificationHelper.controlNotification(this, DaemonStatus())
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
@@ -47,11 +51,22 @@ class ControlService : Service() {
         } else {
             startForeground(NotificationHelper.CONTROL_NOTIFICATION_ID, notification)
         }
+        lastNotifiedKey = notificationKey(DaemonStatus(), ConnectionState())
+        lastOutboundKey = connectionKey(ConnectionState())
         pollJob = scope.launch {
             while (isActive) {
-                refreshStatus()
-                delay(15_000)
+                val status = refreshStatus()
+                // A stopped daemon changes state rarely; polling it every 30s
+                // only burns root-shell wakeups.
+                delay(if (status?.running == true) 30_000 else 120_000)
             }
+        }
+        // The UI triggers reads too (e.g. after start/stop); publish those to the
+        // notification as well instead of waiting for the next poll.
+        notificationJob = scope.launch {
+            combine(container.statusUpdates, container.connection) { status, connection ->
+                status to connection
+            }.collect { (status, connection) -> postNotification(status, connection) }
         }
     }
 
@@ -83,66 +98,60 @@ class ControlService : Service() {
         return START_STICKY
     }
 
-    private suspend fun refreshStatus() {
-        ensureRootSession()
-        val status = withContext(Dispatchers.IO) {
-            runCatching { container.daemon.status() }.getOrDefault(
-                DaemonStatus(lastError = "无法读取 daemon 状态"),
-            )
-        }
-        val key = notificationKey(status)
-        // Reposting an identical notification every 15 s keeps waking the
-        // notification pipeline (and relights the screen LED on some ROMs). The
-        // key ignores the fields that move on every poll: startedAt and rss_kb.
+    private suspend fun refreshStatus(): DaemonStatus? {
+        container.ensureRootSession()
+        return container.refreshStatus()
+    }
+
+    private suspend fun postNotification(status: DaemonStatus, connection: ConnectionState) {
+        val key = notificationKey(status, connection)
+        // Reposting an identical notification wakes the notification pipeline
+        // (and relights the screen LED on some ROMs). The key ignores the fields
+        // that move on every poll: startedAt and rss_kb.
         notificationMutex.withLock {
+            val outbound = connectionKey(connection)
             if (key == lastNotifiedKey) return
             lastNotifiedKey = key
+            val outboundChanged = outbound != lastOutboundKey
+            lastOutboundKey = outbound
+            val islandExtras = runCatching {
+                XiaomiIsland.focusExtras(this, status, connection, expand = outboundChanged)
+            }.getOrNull()
             runCatching {
                 NotificationManagerCompat.from(this).notify(
                     NotificationHelper.CONTROL_NOTIFICATION_ID,
-                    NotificationHelper.controlNotification(this, status),
+                    NotificationHelper.controlNotification(this, status, connection, islandExtras),
                 )
             }
         }
     }
 
-    /**
-     * A sticky restart after a reboot has no cached su session; without this the
-     * notification would claim the daemon is stopped while it is running.
-     */
-    private suspend fun ensureRootSession() {
-        if (rootSessionChecked) return
-        rootSessionChecked = true
-        if (container.root.hasRootShell()) {
-            runCatching { container.settings.setRootGranted(true) }
-            return
-        }
-        if (runCatching { container.settings.rootGranted() }.getOrNull() == false) return
-        when (runCatching { container.root.requestRoot() }.getOrElse { RootRequestResult.ERROR }) {
-            RootRequestResult.GRANTED ->
-                runCatching { container.settings.setRootGranted(true) }
-            RootRequestResult.DENIED ->
-                runCatching { container.settings.setRootGranted(false) }
-            RootRequestResult.TIMEOUT, RootRequestResult.ERROR -> Unit
+    private fun notificationKey(status: DaemonStatus, connection: ConnectionState): String {
+        // Uptime is deliberately absent: the notification draws it with a system
+        // chronometer, and bucketing it here used to force a repost every five
+        // minutes, each taking a NotificationManagerService wakelock.
+        val outbound = "${connectionKey(connection)}|${connection.latencyMs}|${connection.detail}"
+        return with(status) {
+            "$running|$pid|$version|$configValid|$lastError|$mode|$bootEnabled|$watchdog|" +
+                "$desiredRunning|$wan|$wanIp|$node|$dns|$dnsMode|$ipv6Mode|$outbound"
         }
     }
 
-    private fun notificationKey(status: DaemonStatus): String {
-        val uptimeMinutes = if (status.running && status.startedAt > 0) {
-            ((System.currentTimeMillis() - status.startedAt) / 60_000).coerceAtLeast(0L)
-        } else {
-            0L
-        }
-        return with(status) {
-            "$running|$pid|$version|$configValid|$lastError|$mode|$bootEnabled|$watchdog|" +
-                "$desiredRunning|$wan|$wanIp|$node|$dns|$dnsMode|$ipv6Mode|$uptimeMinutes"
-        }
-    }
+    /**
+     * What the user reads as "the outbound changed": which phase we are in,
+     * which node or group is selected and where the traffic actually exits.
+     * Latency is deliberately left out: the periodic re-probe moves it, and that
+     * must not be allowed to expand the island.
+     */
+    private fun connectionKey(connection: ConnectionState) =
+        "${connection.phase}|${connection.target}|${connection.exit?.ip}"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        container.controlServiceRunning.value = false
         pollJob?.cancel()
+        notificationJob?.cancel()
         scope.cancel()
         super.onDestroy()
     }

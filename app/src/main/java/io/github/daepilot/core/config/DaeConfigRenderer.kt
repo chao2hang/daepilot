@@ -9,6 +9,7 @@ import io.github.daepilot.core.model.RoutingRule
 import io.github.daepilot.core.model.RoutingTemplate
 import io.github.daepilot.core.model.ShareEndpoint
 import io.github.daepilot.core.model.ShareLink
+import io.github.daepilot.core.model.daeKey
 import java.security.MessageDigest
 
 /**
@@ -24,21 +25,29 @@ object DaeConfigRenderer {
     private const val MAX_PROCESS_NAME_LENGTH = 15
     private val RESERVED = setOf("direct", "must_direct", "block")
 
+    /**
+     * Hosts Play uses for app/APK downloads. services.googleapis.cn is the
+     * China download front end and is classified as a CN site, so it needs an
+     * explicit proxy rule in bypass-mainland mode.
+     */
+    private val PLAY_DOWNLOAD_HOSTS = listOf(
+        "services.googleapis.cn",
+        "gvt1.com",
+        "gvt2.com",
+        "dl.google.com",
+    )
+
     fun render(spec: RenderSpec): String = buildString(2048 + spec.nodes.size * 96) {
         val prepared = prepareNodes(spec.nodes)
         val groups = buildGroups(spec, prepared)
 
         appendGlobal(spec)
-        appendDns(spec.dns)
+        appendDns(spec.dns, spec.nodes)
         append("subscription {\n}\n\n")
         appendNodes(prepared)
         appendGroups(groups)
         appendRouting(spec, groups)
     }
-
-    /** Node id -> unique dae dialer name, e.g. `HK_01`. */
-    fun nodeKeys(nodes: List<Node>): Map<String, String> =
-        prepareNodes(nodes).associate { it.node.id to it.tag }
 
     private data class PreparedNode(
         val node: Node,
@@ -68,7 +77,13 @@ object DaeConfigRenderer {
                     counter++
                 }
             }
-            val renamed = ShareLink.withName(ShareLink.canonicalize(node.link), tag)
+            val canonical = ShareLink.canonicalize(node.link)
+            val secured = if (node.skipCertVerify) {
+                ShareLink.withInsecureTls(canonical)
+            } else {
+                canonical
+            }
+            val renamed = ShareLink.withName(secured, tag)
             val displayName = if (renamed != null) {
                 tag
             } else {
@@ -76,7 +91,7 @@ object DaeConfigRenderer {
                     ?: node.name.takeIf { it.isNotBlank() }
                     ?: tag
             }
-            PreparedNode(node, tag, renamed ?: ShareLink.canonicalize(node.link), displayName)
+            PreparedNode(node, tag, renamed ?: secured, displayName)
         }
     }
 
@@ -91,14 +106,21 @@ object DaeConfigRenderer {
         append("  auto_config_kernel_parameter: ").append(spec.autoConfigKernelParameter).append('\n')
         append("  dial_mode: ").append(safeDialMode(spec.dialMode)).append('\n')
         append("  allow_insecure: false\n")
-        append("  tcp_check_url: 'http://cp.cloudflare.com,1.1.1.1,2606:4700:4700::1111'\n")
         // Keep health checks on IP literals: hostname checks need the same
         // bootstrap resolver as node domains, which can deadlock on Android.
         // dae parses these as addresses, so the port is mandatory: without it the
         // connectivity check is silently dropped ("missing port in address") and
-        // a dead node is never marked unhealthy.
-        append("  udp_check_dns: '8.8.8.8:53,[2001:4860:4860::8888]:53'\n")
-        append("  check_interval: 30s\n")
+        // a dead node is never marked unhealthy. When IPv6 is blocked the device
+        // has no v6 route, so a v6 check address can never pass and only flaps the
+        // node health state — keep the checks IPv4-only in that mode.
+        if (spec.dns.blockIpv6) {
+            append("  tcp_check_url: 'http://cp.cloudflare.com,1.1.1.1'\n")
+            append("  udp_check_dns: '8.8.8.8:53'\n")
+        } else {
+            append("  tcp_check_url: 'http://cp.cloudflare.com,1.1.1.1,2606:4700:4700::1111'\n")
+            append("  udp_check_dns: '8.8.8.8:53,[2001:4860:4860::8888]:53'\n")
+        }
+        append("  check_interval: ").append(checkIntervalSeconds(spec.nodes.size)).append("s\n")
         append("  check_tolerance: 50ms\n")
         append("  sniffing_timeout: 30ms\n")
         append("  tls_implementation: tls\n")
@@ -110,9 +132,12 @@ object DaeConfigRenderer {
         append("}\n\n")
     }
 
-    private fun StringBuilder.appendDns(dns: DnsConfig) {
+    private fun StringBuilder.appendDns(dns: DnsConfig, nodes: List<Node>) {
         val domestic = dns.domesticUpstream.ifBlank { DnsConfig.DEFAULT_DOMESTIC_UPSTREAM }
         val foreign = dns.foreignUpstream.ifBlank { DnsConfig.DEFAULT_FOREIGN_UPSTREAM }
+        // The module reads this marker before it injects its legacy AAAA
+        // block, so an explicit "allow" is respected across dae restarts.
+        append("# daepilot:ipv6=").append(if (dns.blockIpv6) "block" else "allow").append('\n')
         append("dns {\n")
         append("  upstream {\n")
         append("    alidns: '").append(escapeSingleQuoted(domestic)).append("'\n")
@@ -123,6 +148,21 @@ object DaeConfigRenderer {
         if (dns.useDomesticForCn) {
             append("      qname(geosite:cn) -> alidns\n")
         }
+        if (dns.blockIpv6) {
+            append("      qtype(AAAA) && !qname(geosite:cn) -> reject\n")
+        }
+        // Node server names must resolve without the tunnel: dae's own
+        // bootstrap lookup is captured by its DNS ingress, which would send a
+        // foreign name to googledns through the very proxy that needs the
+        // address. That deadlocks every node with a hostname (VMess nodes on
+        // *.jiedian.stream were unreachable with "bootstrap resolver returned
+        // no usable address"). The domestic resolver answers directly.
+        val nodeNames = nodeServerNames(nodes)
+        if (nodeNames.isNotEmpty()) {
+            append("      qname(")
+                .append(nodeNames.joinToString(", ") { "suffix: $it" })
+                .append(") -> alidns\n")
+        }
         append("      fallback: googledns\n")
         append("    }\n")
         append("    response {\n")
@@ -132,6 +172,32 @@ object DaeConfigRenderer {
         append("    }\n")
         append("  }\n")
         append("}\n\n")
+    }
+
+    /** Hostnames of node servers; IP endpoints need no bootstrap lookup. */
+    private fun nodeServerNames(nodes: List<Node>): List<String> =
+        nodes.mapNotNull { node ->
+            val endpoint = ShareEndpoint.parse(node.link) ?: return@mapNotNull null
+            if (endpoint.isIpv4 || endpoint.isIpv6) return@mapNotNull null
+            endpoint.host.trim().trimEnd('.').lowercase()
+        }
+            .filter { host ->
+                host.isNotEmpty() && host.length <= 253 &&
+                    host.all { it.isLetterOrDigit() || it == '.' || it == '-' || it == '_' }
+            }
+            .distinct()
+
+    /**
+     * Every node is probed (one TCP and one UDP round trip through the tunnel)
+     * once per interval, so a 30 s cadence on a large subscription keeps the
+     * modem busy all day for latency data nobody is looking at: measured 1% of
+     * a core plus the radio tail while the phone was idle. Group policies still
+     * get fresh enough samples at 60-90 s.
+     */
+    private fun checkIntervalSeconds(nodeCount: Int): Int = when {
+        nodeCount <= 6 -> 30
+        nodeCount <= 18 -> 60
+        else -> 90
     }
 
     private fun StringBuilder.appendNodes(nodes: List<PreparedNode>) {
@@ -147,6 +213,8 @@ object DaeConfigRenderer {
         val name: String,
         val filter: List<String>,
         val policy: GroupPolicy,
+        /** Rule outbounds that resolve here: stable key plus legacy display name. */
+        val aliases: List<String> = emptyList(),
     )
 
     private fun buildGroups(
@@ -157,22 +225,39 @@ object DaeConfigRenderer {
         if (nodes.isEmpty()) return result
         val byId = nodes.associateBy { it.node.id }
 
+        // The default outbound is routing's fallback, so `proxy` mirrors the
+        // chosen group. Legacy rules that target `proxy` keep working.
+        val defaultGroup = spec.defaultGroupId
+            ?.let { id -> spec.groups.firstOrNull { it.id == id && it.enabled } }
+        val defaultMembers = defaultGroup
+            ?.nodeIds.orEmpty()
+            .mapNotNull { byId[it]?.displayName }
+            .distinct()
         val selected = spec.selectedNodeId?.let { byId[it] }
-        val autoGroup = if (selected != null) {
-            RenderedGroup("proxy", listOf(selected.displayName), GroupPolicy.FIXED)
-        } else {
-            // No filter means "all nodes" in dae.
-            RenderedGroup("proxy", emptyList(), GroupPolicy.MIN_MOVING_AVG)
+        result += when {
+            defaultGroup != null && defaultMembers.isNotEmpty() ->
+                RenderedGroup("proxy", defaultMembers, defaultGroup.policy)
+            selected != null ->
+                RenderedGroup("proxy", listOf(selected.displayName), GroupPolicy.FIXED)
+            else ->
+                // No filter means "all nodes" in dae.
+                RenderedGroup("proxy", emptyList(), GroupPolicy.MIN_MOVING_AVG)
         }
-        result += autoGroup
 
         val usedNames = mutableSetOf("proxy")
         for (group in spec.groups.filter { it.enabled }) {
             if (group.builtIn) continue
-            val name = uniqueGroupName(group.name, group.id, usedNames) ?: continue
+            val name = uniqueGroupName(group.daeKey(), group.id, usedNames) ?: continue
             val members = group.nodeIds.mapNotNull { byId[it]?.displayName }.distinct()
             if (members.isEmpty()) continue
-            result += RenderedGroup(name, members, group.policy)
+            result += RenderedGroup(
+                name = name,
+                filter = members,
+                policy = group.policy,
+                aliases = listOf(group.daeKey(), group.name)
+                    .filter { it.isNotBlank() }
+                    .distinct(),
+            )
         }
         return result
     }
@@ -227,6 +312,9 @@ object DaeConfigRenderer {
             add("block")
             groups.forEach { add(it.name) }
         }
+        val aliasTargets = groups
+            .flatMap { group -> group.aliases.map { alias -> alias to group.name } }
+            .toMap()
         val fallback = when (spec.template) {
             RoutingTemplate.WHITELIST, RoutingTemplate.DIRECT -> "direct"
             else -> if (groups.isNotEmpty()) groups.first().name else "direct"
@@ -250,6 +338,10 @@ object DaeConfigRenderer {
             .append(") -> must_direct\n")
 
         if (spec.bypassPackages.isNotEmpty()) {
+            // ROMs where dae's pname cgroup hook cannot attach still get a
+            // working per-app bypass: the module marks the selected UIDs with
+            // this DSCP value in netfilter.
+            append("  dscp(").append(BYPASS_DSCP_LITERAL).append(") -> must_direct\n")
             val packages = pnamePattern(
                 spec.bypassPackages
                     .map { it.trim() }
@@ -262,12 +354,26 @@ object DaeConfigRenderer {
 
         for (rule in spec.customRules.filter { it.enabled }) {
             val expression = sanitizeRule(rule.expression) ?: continue
-            val target = sanitizeIdentifier(rule.outbound).takeIf { it in validTargets } ?: "direct"
+            val requested = rule.outbound.trim()
+            val target = when {
+                requested in validTargets -> requested
+                else -> aliasTargets[requested]
+                    ?: aliasTargets[sanitizeIdentifier(requested)]
+                    ?: "direct"
+            }
             append("  ").append(expression).append(" -> ").append(target).append('\n')
         }
 
         when (spec.template) {
             RoutingTemplate.BYPASS_MAINLAND -> {
+                // Play downloads are served by services.googleapis.cn, whose
+                // answers are China Mobile GGC cache IPs inside geoip:cn. That
+                // direct path stalls (0 B/s) on some carriers while the same
+                // cache answers normally through the proxy, so the download
+                // hosts have to win over the CN direct rules.
+                append("  domain(")
+                    .append(PLAY_DOWNLOAD_HOSTS.joinToString(", ") { "suffix: $it" })
+                    .append(") -> ").append(fallback).append('\n')
                 append("  domain(geosite:cn) -> direct\n")
                 append("  dip(geoip:cn) -> direct\n")
             }
@@ -276,6 +382,14 @@ object DaeConfigRenderer {
                 // leftovers are direct, which is what fallback below does.
             }
             RoutingTemplate.GLOBAL, RoutingTemplate.DIRECT -> Unit
+        }
+
+        // The DNS layer already rejects AAAA for proxied names, but apps still
+        // dial cached/hardcoded IPv6 (e.g. Telegram). Without an IPv6 egress the
+        // proxy relay hangs on "network is unreachable"; block non-CN IPv6 here
+        // so it fails fast. CN IPv6 matched dip(geoip:cn) above stays direct.
+        if (spec.dns.blockIpv6) {
+            append("  ipversion(6) -> block\n")
         }
 
         append("  fallback: ").append(fallback).append('\n')
@@ -373,4 +487,8 @@ object DaeConfigRenderer {
 
     /** User-facing rule alternatives shown by the rule editor. */
     val OUTBOUND_TARGETS = listOf("proxy", "direct", "block", "must_direct")
+
+    /** DSCP value the module applies to UID-based bypass traffic. */
+    const val BYPASS_DSCP = 0x2f
+    private const val BYPASS_DSCP_LITERAL = "0x2f"
 }

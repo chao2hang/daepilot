@@ -46,6 +46,7 @@ data class NodeEntity(
     val favorite: Boolean,
     val createdAt: Long,
     val countryCode: String?,
+    val skipCertVerify: Boolean,
 )
 
 @Dao
@@ -104,13 +105,14 @@ interface NodeDao {
     @Query("UPDATE nodes SET favorite = :favorite WHERE id = :id")
     suspend fun setFavorite(id: String, favorite: Boolean)
 
-    @Query("UPDATE nodes SET latencyMs = NULL, lastTestedAt = 0")
-    suspend fun clearLatency()
+    @Query("UPDATE nodes SET skipCertVerify = :skip WHERE id = :id")
+    suspend fun setSkipCertVerify(id: String, skip: Boolean)
+
 }
 
 @Database(
     entities = [SubscriptionEntity::class, NodeEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -121,13 +123,25 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile
         private var instance: AppDatabase? = null
 
+        // Subscriptions are user data; the destructive fallback must never be
+        // what upgrades an existing install.
+        private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE nodes ADD COLUMN skipCertVerify INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
         fun get(context: android.content.Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: androidx.room.Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "daepilot.db",
-                ).fallbackToDestructiveMigration().build().also { instance = it }
+                ).addMigrations(MIGRATION_1_2)
+                    .fallbackToDestructiveMigration()
+                    .build().also { instance = it }
             }
     }
 }

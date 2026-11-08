@@ -25,7 +25,6 @@ class DomainTesterTest {
         server.start()
         tester = DomainTester(
             client = DomainTester.defaultClient(),
-            targets = emptyList(),
             exitProbeUrl = server.url("/trace").toString(),
         )
     }
@@ -68,6 +67,17 @@ class DomainTesterTest {
     }
 
     @Test
+    fun `auth rejection is reachable only when allowed`() {
+        server.enqueue(MockResponse().setResponseCode(401))
+        val strict = runBlocking { tester.probe(target()) }
+        assertFalse(strict.reachable)
+
+        server.enqueue(MockResponse().setResponseCode(401))
+        val lenient = runBlocking { tester.probe(target(allowAuth = true)) }
+        assertTrue(lenient.reachable)
+    }
+
+    @Test
     fun `failure reasons are human readable`() {
         assertEquals("DNS 解析失败", tester.classify(UnknownHostException("x")))
         assertEquals("连接超时", tester.classify(SocketTimeoutException()))
@@ -84,11 +94,20 @@ class DomainTesterTest {
         assertNull(tester.parseExit("not a trace"))
     }
 
-    private fun target(expect204: Boolean = false): DomainTarget =
+    @Test
+    fun `exit probe reads the trace endpoint`() = runBlocking {
+        server.enqueue(MockResponse().setBody("ip=1.2.3.4\nloc=JP\ncolo=NRT\n"))
+        val exit = tester.fetchExit()
+        assertEquals("1.2.3.4", exit?.ip)
+        assertEquals("JP", exit?.country)
+    }
+
+    private fun target(expect204: Boolean = false, allowAuth: Boolean = false): DomainTarget =
         DomainTarget(
             label = "Test",
             host = "localhost",
             url = server.url("/probe").toString(),
             expect204 = expect204,
+            allowAuth = allowAuth,
         )
 }

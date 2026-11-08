@@ -12,16 +12,29 @@ import io.github.daepilot.BuildConfig
 import io.github.daepilot.DaePilotApp
 import io.github.daepilot.core.config.ConfigRedactor
 import io.github.daepilot.core.config.DaeConfigRenderer
+import io.github.daepilot.core.config.SpeedTestPlan
 import io.github.daepilot.core.model.AppSettings
-import io.github.daepilot.core.network.DomainTestReport
+import io.github.daepilot.core.model.AppSnapshot
+import io.github.daepilot.core.network.DomainTargets
+import io.github.daepilot.core.network.DomainTestResult
 import io.github.daepilot.core.network.DomainTester
+import io.github.daepilot.core.network.ExitInfo
+import io.github.daepilot.core.network.SpeedTestResult
+import io.github.daepilot.core.network.SpeedTester
+import io.github.daepilot.core.network.TlsTrustProbe
 import io.github.daepilot.core.model.CompatibilityReport
+import io.github.daepilot.core.model.ConnectionPhase
+import io.github.daepilot.core.model.ConnectionState
 import io.github.daepilot.core.model.DaemonStatus
 import io.github.daepilot.core.model.DnsConfig
+import io.github.daepilot.core.model.Node
 import io.github.daepilot.core.model.OutboundGroup
+import io.github.daepilot.core.model.ShareLink
+import io.github.daepilot.core.model.daeKey
 import io.github.daepilot.core.model.RoutingRule
 import io.github.daepilot.core.model.RoutingTemplate
 import io.github.daepilot.data.ImportResult
+import io.github.daepilot.data.SubscriptionPreview
 import io.github.daepilot.core.root.ActionResult
 import io.github.daepilot.core.root.RootRequestResult
 import io.github.daepilot.data.net.LogUploadRequest
@@ -29,15 +42,22 @@ import io.github.daepilot.data.net.LogUploader
 import io.github.daepilot.service.ControlService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
@@ -60,10 +80,29 @@ data class LogUploadState(
     val error: String? = null,
 )
 
-data class DomainTestUiState(
+data class SubscriptionPreviewUiState(
     val running: Boolean = false,
-    val report: DomainTestReport? = null,
-    val error: String? = null,
+    val url: String = "",
+    val preview: SubscriptionPreview? = null,
+)
+
+data class SpeedTestState(
+    val runningNodeId: String? = null,
+    val results: Map<String, SpeedTestResult> = emptyMap(),
+)
+
+/** Home-screen probe results keyed by [DomainTarget.host]. */
+data class SiteProbeState(
+    val results: Map<String, DomainTestResult> = emptyMap(),
+    val testing: Set<String> = emptySet(),
+    val lastRunAt: Long = 0L,
+)
+
+data class BandwidthState(
+    val running: Boolean = false,
+    val result: SpeedTestResult? = null,
+    val testedAt: Long = 0L,
+    val proxied: Boolean = false,
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -73,8 +112,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     val snapshot = repo.snapshot
 
-    private val _status = MutableStateFlow(DaemonStatus())
-    val status: StateFlow<DaemonStatus> = _status.asStateFlow()
+    val status: StateFlow<DaemonStatus> = container.statusUpdates
 
     private val _compatibility = MutableStateFlow<CompatibilityReport?>(null)
     val compatibility: StateFlow<CompatibilityReport?> = _compatibility.asStateFlow()
@@ -92,23 +130,37 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val logUpload: StateFlow<LogUploadState> = _logUpload.asStateFlow()
 
     private val domainTester = DomainTester()
-    private val _domainTest = MutableStateFlow(DomainTestUiState())
-    val domainTest: StateFlow<DomainTestUiState> = _domainTest.asStateFlow()
-    private var domainTestJob: Job? = null
+
+    private val _subscriptionPreview = MutableStateFlow(SubscriptionPreviewUiState())
+    val subscriptionPreview: StateFlow<SubscriptionPreviewUiState> = _subscriptionPreview.asStateFlow()
+    private var subscriptionPreviewJob: Job? = null
+
+    private val speedTester = SpeedTester()
+    private val _speedTest = MutableStateFlow(SpeedTestState())
+    val speedTest: StateFlow<SpeedTestState> = _speedTest.asStateFlow()
+    private var speedTestJob: Job? = null
+    private var speedTestNoticeSeen = false
+
+    private val _siteProbes = MutableStateFlow(SiteProbeState())
+    val siteProbes: StateFlow<SiteProbeState> = _siteProbes.asStateFlow()
+    private var siteProbeJob: Job? = null
+
+    private val _connection = container.connection
+    val connection: StateFlow<ConnectionState> = container.connection
+    private var verifyJob: Job? = null
+    private var verifyToken = 0
+    private val switchMutex = Mutex()
+
+    private val _bandwidth = MutableStateFlow(BandwidthState())
+    val bandwidth: StateFlow<BandwidthState> = _bandwidth.asStateFlow()
+    private var bandwidthJob: Job? = null
 
     private val messageChannel = Channel<String>(Channel.BUFFERED)
     val messages = messageChannel.receiveAsFlow()
 
     private var logJob: Job? = null
     private var statusJob: Job? = null
-    // After a reboot the daemon keeps running but this process has no cached su
-    // session, so status reads would report "no-root" forever. One silent
-    // re-acquisition per process is enough; a manual request covers later loss.
-    private var rootSessionChecked = false
-    // `status()` shells out to root with a 20 s timeout while the poller fires
-    // every 12 s; refreshes are skipped rather than queued behind the call that is
-    // already running, so waiters can never pile up on the root shell.
-    private val statusMutex = Mutex()
+    private var bypassUidsSynced = false
     private val recentEvents = ArrayDeque<String>()
     private val eventTime = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
@@ -117,9 +169,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching { repo.migrateLegacyDns() }
         }
+    }
+
+    fun onUiStarted() {
+        refreshStatus()
+        startStatusPolling()
+    }
+
+    fun onUiStopped() {
+        statusJob?.cancel()
+        statusJob = null
+    }
+
+    private fun startStatusPolling() {
+        if (statusJob?.isActive == true) return
         statusJob = viewModelScope.launch {
+            var tick = 0
+            var lastRunning: Boolean? = null
             while (isActive) {
-                refreshStatus()
+                // While the control service runs it already polls for us.
+                if (!container.controlServiceRunning.value) refreshStatus()
+                val running = status.value.running
+                if (running != lastRunning) {
+                    lastRunning = running
+                    if (running) {
+                        refreshConnection(announce = false)
+                    } else {
+                        onProxyStopped()
+                    }
+                }
+                // Real traffic through the node is the only honest proxy check,
+                // so re-probe the home sites every couple of minutes.
+                if (tick > 0 && running) {
+                    if (tick % 10 == 0) refreshSiteProbes()
+                    if (tick % 25 == 0) refreshConnection(announce = false)
+                }
+                tick++
                 delay(12_000)
             }
         }
@@ -191,39 +276,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshStatus() {
         viewModelScope.launch {
-            // Skip while a read is already in flight: the poller would otherwise
-            // stack waiters behind a root command that can take the full timeout.
-            if (!statusMutex.tryLock()) return@launch
-            try {
-                ensureRootSession()
-                _status.value = runCatching { daemon.status() }.getOrElse {
-                    DaemonStatus(lastError = it.message ?: "状态读取失败")
+            container.ensureRootSession()
+            if (!bypassUidsSynced && container.root.hasRootShell()) {
+                bypassUidsSynced = true
+                runCatching {
+                    val packages = repo.snapshotNow().settings.bypassPackages
+                    daemon.syncBypassUids(packages)
                 }
-            } finally {
-                statusMutex.unlock()
             }
-        }
-    }
-
-    /**
-     * Rebuilds the su session that the app lost across a reboot. Skipped only
-     * when the user explicitly declined root before, so we never re-prompt a
-     * decision they already made.
-     */
-    private suspend fun ensureRootSession() {
-        if (rootSessionChecked) return
-        rootSessionChecked = true
-        if (container.root.hasRootShell()) {
-            runCatching { container.settings.setRootGranted(true) }
-            return
-        }
-        if (runCatching { container.settings.rootGranted() }.getOrNull() == false) return
-        when (runCatching { container.root.requestRoot() }.getOrElse { RootRequestResult.ERROR }) {
-            RootRequestResult.GRANTED ->
-                runCatching { container.settings.setRootGranted(true) }
-            RootRequestResult.DENIED ->
-                runCatching { container.settings.setRootGranted(false) }
-            RootRequestResult.TIMEOUT, RootRequestResult.ERROR -> Unit
+            // The container drops this read when another one is already in
+            // flight, so waiters can never pile up on the root shell.
+            container.refreshStatus()
         }
     }
 
@@ -246,6 +309,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleProxy(enable: Boolean) = viewModelScope.launch {
+        var started = false
         withBusy {
             if (enable) {
                 if (!container.root.hasRootShell() &&
@@ -264,31 +328,41 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val applied = daemon.applyConfig(
                     DaeConfigRenderer.render(spec),
-                    reload = _status.value.running,
+                    reload = status.value.running,
                 )
                 if (!applied.ok) {
                     notify("无法应用配置：${applied.message}")
                     return@withBusy
                 }
-                val started = daemon.start()
-                if (!started.ok) {
-                    notify("启动失败：${started.message}")
-                } else if (snap.settings.bootStart) {
-                    daemon.enableBootStart()
+                val startedResult = daemon.start()
+                if (!startedResult.ok) {
+                    notify("启动失败：${startedResult.message}")
+                } else {
+                    started = true
+                    if (snap.settings.bootStart) {
+                        daemon.enableBootStart()
+                    }
                 }
             } else {
                 val stopped = daemon.stop()
                 notify(if (stopped.ok) "dae 已停止" else "停止失败：${stopped.message}")
             }
         }
-        refreshStatus()
+        container.ensureRootSession()
+        val live = container.refreshStatus()
+        val running = live?.running ?: status.value.running
+        if (enable && started && running) {
+            refreshConnection(announce = true)
+        } else if (!running) {
+            onProxyStopped()
+        }
     }
 
     fun applyConfig() = viewModelScope.launch {
         withBusy {
             val result = daemon.applyConfig(
                 repo.render(repo.snapshotNow()),
-                reload = _status.value.running,
+                reload = status.value.running,
             )
             notify(if (result.ok) "配置已应用：${result.message}" else "应用失败：${result.message}")
         }
@@ -296,7 +370,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun applyIfRunning() {
-        if (!_status.value.running) return
+        if (!status.value.running) return
         val rendered = repo.render(repo.snapshotNow())
         val result = daemon.applyConfig(rendered, reload = true)
         if (!result.ok) notify("热更新失败：${result.message}")
@@ -319,6 +393,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val result = repo.addSubscription(name, url)
             notify(describeImport(result))
         }
+    }
+
+    fun previewSubscription(url: String) {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) return
+        if (_subscriptionPreview.value.running && _subscriptionPreview.value.url == trimmed) return
+        subscriptionPreviewJob?.cancel()
+        subscriptionPreviewJob = viewModelScope.launch {
+            _subscriptionPreview.value = SubscriptionPreviewUiState(running = true, url = trimmed)
+            val preview = runCatching { repo.previewSubscription(trimmed) }
+                .getOrElse { SubscriptionPreview(false, it.message ?: "预览失败") }
+            _subscriptionPreview.value = SubscriptionPreviewUiState(url = trimmed, preview = preview)
+        }
+    }
+
+    fun clearSubscriptionPreview() {
+        subscriptionPreviewJob?.cancel()
+        subscriptionPreviewJob = null
+        _subscriptionPreview.value = SubscriptionPreviewUiState()
     }
 
     fun refreshSubscription(id: String) = viewModelScope.launch {
@@ -361,9 +454,264 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         repo.setFavorite(id, favorite)
     }
 
-    fun selectNode(id: String?) = viewModelScope.launch {
-        repo.selectNode(id)
+    fun setNodeSkipCertVerify(id: String, skip: Boolean) = viewModelScope.launch {
+        repo.setNodeSkipCertVerify(id, skip)
         applyIfRunning()
+    }
+
+    fun selectNode(id: String?) = viewModelScope.launch {
+        val label = repo.snapshotNow().nodes.firstOrNull { it.id == id }?.name ?: "自动选择"
+        switchOutbound(label) { repo.selectNode(id) }
+    }
+
+    fun selectGroup(id: String) = viewModelScope.launch {
+        val label = repo.snapshotNow().groups.firstOrNull { it.id == id }?.name ?: "分组"
+        switchOutbound(label) { repo.selectGroup(id) }
+    }
+
+    fun selectAuto() = viewModelScope.launch {
+        switchOutbound("自动选择") { repo.selectAuto() }
+    }
+
+    /**
+     * A switch is only reported as successful once traffic actually left through
+     * the new outbound, so a broken node cannot look connected just because the
+     * config reload returned without an error.
+     */
+    private suspend fun switchOutbound(label: String, select: suspend () -> Unit) =
+        switchMutex.withLock {
+            if (!status.value.running) {
+                select()
+                _connection.value = ConnectionState(
+                    phase = ConnectionPhase.STOPPED,
+                    target = label,
+                    detail = "代理未启用",
+                )
+                notify("已选择 $label（代理未启用）")
+                return@withLock
+            }
+            verifyJob?.cancel()
+            verifyToken++
+            _connection.value = ConnectionState(
+                phase = ConnectionPhase.APPLYING,
+                target = label,
+                detail = "正在应用 $label 的配置",
+                checkedAt = System.currentTimeMillis(),
+            )
+            select()
+            val applied = daemon.applyConfig(repo.render(repo.snapshotNow()), reload = true)
+            if (!applied.ok) {
+                _connection.value = ConnectionState(
+                    phase = ConnectionPhase.FAILED,
+                    target = label,
+                    detail = applied.message,
+                    checkedAt = System.currentTimeMillis(),
+                )
+                notify("切换到 $label 失败：${applied.message}")
+                return@withLock
+            }
+            _connection.value = _connection.value.copy(
+                phase = ConnectionPhase.VERIFYING,
+                detail = "配置已应用，正在验证出口",
+            )
+            verifyConnection(label, announce = true, switched = true)
+        }
+
+    /** Re-reads the exit IP without touching the selection. */
+    fun refreshExit() {
+        if (!status.value.running) {
+            notify("代理未启用，无法读取出口 IP")
+            return
+        }
+        viewModelScope.launch { refreshConnection(announce = true) }
+    }
+
+    private suspend fun refreshConnection(announce: Boolean) {
+        if (_connection.value.phase == ConnectionPhase.APPLYING) {
+            if (announce) notify("正在切换出口，请稍候")
+            return
+        }
+        if (verifyJob?.isActive == true) {
+            if (announce) notify("正在验证出口，请稍候")
+            return
+        }
+        if (!status.value.running) {
+            if (announce) notify("代理未启用，无法读取出口 IP")
+            return
+        }
+        val label = currentOutboundLabel()
+        if (announce) {
+            _connection.value = _connection.value.copy(
+                phase = ConnectionPhase.VERIFYING,
+                target = _connection.value.target.ifBlank { label },
+                detail = "正在验证出口",
+            )
+        }
+        verifyConnection(label, announce = announce)
+    }
+
+    private suspend fun currentOutboundLabel(): String {
+        val snap = repo.snapshotNow()
+        return snap.groups.firstOrNull { it.id == snap.defaultGroupId }?.name
+            ?: snap.nodes.firstOrNull { it.id == snap.selectedNodeId }?.name
+            ?: "自动选择"
+    }
+
+    /**
+     * Confirms the selection with a request that has to leave through the
+     * tunnel. The Cloudflare trace only decorates the result with the exit IP:
+     * it can be answered over a direct route, so it never proves the switch.
+     */
+    private fun verifyConnection(
+        target: String,
+        announce: Boolean,
+        switched: Boolean = false,
+        allowCertFix: Boolean = true,
+    ) {
+        verifyJob = viewModelScope.launch {
+            val token = ++verifyToken
+            var probe: DomainTestResult? = null
+            var exit: ExitInfo? = null
+            var failure = "出口探测失败"
+            // Both probes run together: a dead node otherwise costs two full
+            // timeouts per attempt before the switch is reported as failed.
+            for (attempt in 0 until 2) {
+                if (!status.value.running) return@launch
+                coroutineScope {
+                    val site = async { probeProxiedSite() }
+                    val trace = async {
+                        runCatching { domainTester.fetchExit() }.getOrNull()
+                    }
+                    probe = site.await()
+                    exit = trace.await()
+                }
+                // Only a request that really left through the tunnel proves the
+                // switch: the trace on its own can be answered by a direct route
+                // while the node is broken.
+                if (probe?.reachable == true) break
+                failure = probe?.detail ?: "出口探测失败"
+                if (attempt == 0) delay(1_500)
+            }
+            // A newer switch or a stop makes this result stale.
+            if (token != verifyToken) return@launch
+            if (!status.value.running) {
+                onProxyStopped()
+                return@launch
+            }
+            if (probe?.reachable == true) {
+                val state = _connection.value.copy(
+                    phase = ConnectionPhase.CONNECTED,
+                    target = target,
+                    exit = exit ?: _connection.value.exit,
+                    latencyMs = probe?.latencyMs ?: _connection.value.latencyMs,
+                    checkedAt = System.currentTimeMillis(),
+                    detail = "",
+                )
+                _connection.value = state
+                if (announce) notify(if (switched) switchedMessage(state) else exitMessage(state))
+            } else if (allowCertFix && token == verifyToken && applyCertFix(token)) {
+                notify("节点证书无法校验，已自动启用跳过校验，正在重连")
+                verifyConnection(target, announce, switched, allowCertFix = false)
+            } else {
+                _connection.value = _connection.value.copy(
+                    phase = ConnectionPhase.FAILED,
+                    target = target,
+                    exit = null,
+                    checkedAt = System.currentTimeMillis(),
+                    detail = failure,
+                )
+                if (announce) {
+                    notify(
+                        if (switched) "切换到 $target 后连接失败：$failure"
+                        else "出口探测失败：$failure",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Google proves the tunnel; YouTube is the tie-breaker so one blocked site
+     * cannot be reported as a dead node. The home screen list keeps showing the
+     * Google result it measured.
+     */
+    private suspend fun probeProxiedSite(): DomainTestResult? {
+        val google = runCatching { domainTester.probeOne(DomainTargets.google) }.getOrNull()
+        google?.let { result ->
+            _siteProbes.update {
+                it.copy(results = it.results + (DomainTargets.google.host to result))
+            }
+        }
+        if (google?.reachable == true) return google
+        val youtube = runCatching { domainTester.probeOne(DomainTargets.youtube) }.getOrNull()
+        return if (youtube?.reachable == true) youtube else google
+    }
+
+    /**
+     * Before a failed selection is reported as dead, ask its TLS servers for
+     * their certificates. A self-signed certificate makes dae reject an
+     * otherwise healthy node with `x509: certificate signed by unknown
+     * authority`, which looks like a dead node to the exit probe. Only nodes
+     * whose certificate actually fails verification get the per-node override,
+     * then the config is re-applied and the caller retries once.
+     */
+    private suspend fun applyCertFix(staleToken: Int): Boolean {
+        val candidates = selectionNodes(repo.snapshotNow())
+            .filter { !it.skipCertVerify && ShareLink.usesTls(it.link) }
+        if (candidates.isEmpty()) return false
+        val rejected = withContext(Dispatchers.IO) {
+            coroutineScope {
+                val permits = Semaphore(4)
+                candidates.map { node ->
+                    async {
+                        permits.withPermit {
+                            val endpoint = node.endpoint ?: return@withPermit null
+                            val port = endpoint.port ?: return@withPermit null
+                            val serverName = ShareLink.tlsServerName(node.link) ?: endpoint.host
+                            val trusted = TlsTrustProbe.probe(endpoint.host, port, serverName)
+                            if (trusted == false) node else null
+                        }
+                    }
+                }.awaitAll().filterNotNull()
+            }
+        }
+        if (rejected.isEmpty()) return false
+        switchMutex.withLock {
+            if (staleToken != verifyToken || !status.value.running) return false
+            rejected.forEach { repo.setNodeSkipCertVerify(it.id, true) }
+            val applied = daemon.applyConfig(repo.render(repo.snapshotNow()), reload = true)
+            if (!applied.ok) {
+                rejected.forEach { repo.setNodeSkipCertVerify(it.id, false) }
+                return false
+            }
+        }
+        return true
+    }
+
+    /** Nodes dae is currently sending traffic through. */
+    private fun selectionNodes(snapshot: AppSnapshot): List<Node> {
+        val byId = snapshot.nodes.associateBy { it.id }
+        val group = snapshot.groups.firstOrNull { it.id == snapshot.defaultGroupId }
+        if (group != null) return group.nodeIds.mapNotNull { byId[it] }
+        return listOfNotNull(snapshot.selectedNodeId?.let { byId[it] })
+    }
+
+    private fun switchedMessage(state: ConnectionState): String =
+        "已切换到 ${state.target} · ${exitMessage(state)}"
+
+    private fun exitMessage(state: ConnectionState): String {
+        val exit = state.exit ?: return "已连接，但出口 IP 未知"
+        val place = listOf(exit.country, exit.colo)
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+        return "出口 ${exit.ip}" + (if (place.isNotBlank()) " · $place" else "")
+    }
+
+    private fun onProxyStopped() {
+        verifyJob?.cancel()
+        verifyJob = null
+        verifyToken++
+        _connection.value = ConnectionState(phase = ConnectionPhase.STOPPED)
     }
 
     fun testAllNodes() = viewModelScope.launch {
@@ -391,27 +739,166 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    /** Manual egress test. Runs on the normal app network, so the dae hooks see
-     *  the same traffic a browser would. */
-    fun runDomainTests() {
-        if (domainTestJob?.isActive == true) return
-        domainTestJob = viewModelScope.launch {
-            val proxy = _status.value
-            _domainTest.value = DomainTestUiState(running = true)
-            val report = runCatching { domainTester.run(proxy.running, proxy.node) }
-            _domainTest.value = report.fold(
-                onSuccess = { DomainTestUiState(report = it) },
-                onFailure = {
-                    DomainTestUiState(error = it.message ?: it.javaClass.simpleName)
-                },
-            )
-            report.getOrNull()?.let { result ->
-                val ok = result.results.count { it.reachable }
-                val blocked = result.results.filter { !it.reachable }.map { it.target.label }
-                recordEvent(
-                    "连接测试：$ok/${result.results.size} 可达" +
-                        if (blocked.isEmpty()) "" else "，不可达 ${blocked.joinToString("/")}",
+    fun speedTestNeedsNotice(): Boolean = !speedTestNoticeSeen
+
+    fun acknowledgeSpeedTestNotice() {
+        speedTestNoticeSeen = true
+    }
+
+    /**
+     * Measures a node by temporarily routing only the speed-test host through
+     * it. The user's selected node and every other rule stay untouched, and the
+     * original config is re-applied when the test ends.
+     */
+    fun testNodeSpeed(nodeId: String) {
+        if (_speedTest.value.runningNodeId != null) {
+            notify("已有测速正在进行")
+            return
+        }
+        if (_bandwidth.value.running) {
+            notify("首页带宽测速正在进行，请稍后")
+            return
+        }
+        speedTestJob = viewModelScope.launch {
+            withBusy {
+                if (!container.root.hasRootShell() &&
+                    !requestRootInternal(installModule = true)
+                ) {
+                    return@withBusy
+                }
+                val live = runCatching { daemon.status() }.getOrNull()
+                if (live?.running != true) {
+                    notify("请先启用代理后再测速")
+                    return@withBusy
+                }
+                val snapshot = repo.snapshotNow()
+                val node = snapshot.nodes.firstOrNull { it.id == nodeId }
+                if (node == null) {
+                    notify("节点不存在")
+                    return@withBusy
+                }
+                val plan = SpeedTestPlan.build(
+                    spec = repo.renderSpec(snapshot),
+                    nodeId = nodeId,
+                    selfPackage = getApplication<Application>().packageName,
                 )
+                if (plan == null) {
+                    notify("节点所在订阅已停用，无法测速")
+                    return@withBusy
+                }
+                _speedTest.update { it.copy(runningNodeId = nodeId) }
+                notify("正在测速：${node.name}")
+                var tempApplied = false
+                try {
+                    val temp = runCatching {
+                        daemon.applyConfig(DaeConfigRenderer.render(plan), reload = true)
+                    }.getOrElse {
+                        ActionResult(false, it.message ?: "应用测速配置失败")
+                    }
+                    if (!temp.ok) {
+                        notify("无法切换到测速节点：${temp.message}")
+                        return@withBusy
+                    }
+                    tempApplied = true
+                    val result = runCatching { speedTester.run() }
+                        .getOrElse { SpeedTestResult(error = it.message ?: "测速失败") }
+                    _speedTest.update { it.copy(results = it.results + (nodeId to result)) }
+                    if (result.downloadMbps == null && result.uploadMbps == null) {
+                        notify("测速失败：${result.error ?: "没有可用结果"}")
+                    } else {
+                        notify(
+                            "测速完成：↓ ${Format.mbps(result.downloadMbps)} Mbps · " +
+                                "↑ ${Format.mbps(result.uploadMbps)} Mbps",
+                        )
+                    }
+                } finally {
+                    _speedTest.update { it.copy(runningNodeId = null) }
+                    if (tempApplied) {
+                        val restored = runCatching {
+                            val current = repo.snapshotNow()
+                            daemon.applyConfig(repo.render(current), reload = true)
+                        }.getOrNull()
+                        if (restored == null || !restored.ok) {
+                            notify("测速后恢复分流配置失败，请到分流页重新应用")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Probes the home-screen sites one at a time through the live network. Only
+     * auto-runs while the proxy is up; otherwise the latencies would describe a
+     * direct connection and make a broken node look healthy.
+     */
+    fun refreshSiteProbes() {
+        if (siteProbeJob?.isActive == true) return
+        if (!status.value.running) return
+        val now = System.currentTimeMillis()
+        if (now - _siteProbes.value.lastRunAt < 90_000) return
+        siteProbeJob = viewModelScope.launch {
+            val targets = DomainTargets.home
+            _siteProbes.update { it.copy(testing = targets.map { target -> target.host }.toSet()) }
+            var results = _siteProbes.value.results
+            var completed = true
+            for (target in targets) {
+                // The daemon may stop mid-run; the remaining probes would then
+                // measure a direct connection and overwrite valid results.
+                if (!status.value.running) {
+                    completed = false
+                    break
+                }
+                val result = runCatching { domainTester.probeOne(target) }.getOrNull()
+                if (result != null) results = results + (target.host to result)
+                _siteProbes.update { it.copy(results = results, testing = it.testing - target.host) }
+            }
+            _siteProbes.update {
+                it.copy(
+                    testing = emptySet(),
+                    lastRunAt = if (completed) System.currentTimeMillis() else it.lastRunAt,
+                )
+            }
+        }
+    }
+
+    fun testSite(host: String) {
+        val target = DomainTargets.home.firstOrNull { it.host == host } ?: return
+        if (_siteProbes.value.testing.contains(host)) return
+        _siteProbes.update { it.copy(testing = it.testing + host) }
+        viewModelScope.launch {
+            val result = runCatching { domainTester.probeOne(target) }.getOrNull()
+            _siteProbes.update {
+                val updated = if (result == null) it.results else it.results + (host to result)
+                it.copy(results = updated, testing = it.testing - host)
+            }
+            if (result != null && !result.reachable) {
+                notify("${target.label} 不可达：${result.detail}")
+            }
+        }
+    }
+
+    /** Measures the current egress. Runs on the normal app network, so with the
+     *  proxy up these are the proxied down/up speeds. */
+    fun testBandwidth() {
+        if (_bandwidth.value.running) return
+        if (_speedTest.value.runningNodeId != null) {
+            notify("节点测速正在进行，请稍后")
+            return
+        }
+        _bandwidth.update { it.copy(running = true) }
+        val proxied = status.value.running
+        bandwidthJob = viewModelScope.launch {
+            val result = runCatching { speedTester.run() }
+                .getOrElse { SpeedTestResult(error = it.message ?: "测速失败") }
+            _bandwidth.value = BandwidthState(
+                running = false,
+                result = result,
+                testedAt = System.currentTimeMillis(),
+                proxied = proxied,
+            )
+            if (result.downloadMbps == null && result.uploadMbps == null) {
+                notify("带宽测速失败：${result.error ?: "没有可用结果"}")
             }
         }
     }
@@ -446,6 +933,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         applyIfRunning()
     }
 
+    fun moveRule(id: String, offset: Int) = viewModelScope.launch {
+        repo.moveRule(id, offset)
+        applyIfRunning()
+    }
+
+    fun duplicateRule(id: String) = viewModelScope.launch {
+        repo.duplicateRule(id)
+        notify("规则已复制")
+        applyIfRunning()
+    }
+
     fun setRuleEnabled(id: String, enabled: Boolean) = viewModelScope.launch {
         repo.setRuleEnabled(id, enabled)
         applyIfRunning()
@@ -458,6 +956,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteGroup(id: String) = viewModelScope.launch {
+        val snap = repo.snapshotNow()
+        val group = snap.groups.firstOrNull { it.id == id } ?: return@launch
+        val refs = snap.rules.count { rule ->
+            rule.enabled && (rule.outbound == group.daeKey() || rule.outbound == group.name)
+        }
+        if (refs > 0) {
+            notify("有 $refs 条规则正在使用「${group.name}」，请先修改规则")
+            return@launch
+        }
         repo.deleteGroup(id)
         notify("分组已删除")
         applyIfRunning()
@@ -496,8 +1003,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setBypassPackages(values: List<String>) = viewModelScope.launch {
-        repo.updateSettings { it.copy(bypassPackages = values.distinct()) }
-        notify("绕过应用已更新")
+        val packages = values.distinct()
+        repo.updateSettings { it.copy(bypassPackages = packages) }
+        val sync = runCatching { daemon.syncBypassUids(packages) }
+            .getOrElse { ActionResult(false, it.message ?: "分应用标记失败") }
+        notify(if (sync.ok) sync.message else "分应用标记失败：${sync.message}")
         applyIfRunning()
     }
 
@@ -567,7 +1077,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             "读取日志失败：${it.message ?: it.javaClass.simpleName}"
         }
         recordEvent("上传运行日志")
-        val status = _status.value
+        val status = status.value
         // Rendering the whole config walks every node link (base64 + canonicalize);
         // keep it off the main thread and read the stores, not the debounced snapshot.
         val configText = runCatching {
@@ -639,22 +1149,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _logUpload.value = LogUploadState()
     }
 
-    fun startDaemonFromQuickAction() = viewModelScope.launch {
-        withBusy {
-            val result = daemon.start()
-            notify(if (result.ok) "dae 已启动" else "启动失败：${result.message}")
-        }
-        refreshStatus()
-    }
-
-    fun stopDaemonFromQuickAction() = viewModelScope.launch {
-        withBusy {
-            val result = daemon.stop()
-            notify(if (result.ok) "dae 已停止" else "停止失败：${result.message}")
-        }
-        refreshStatus()
-    }
-
     private fun notify(message: String) {
         recordEvent(message)
         messageChannel.trySend(message)
@@ -700,6 +1194,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         logJob?.cancel()
         statusJob?.cancel()
+        subscriptionPreviewJob?.cancel()
+        speedTestJob?.cancel()
+        siteProbeJob?.cancel()
+        bandwidthJob?.cancel()
         super.onCleared()
     }
 

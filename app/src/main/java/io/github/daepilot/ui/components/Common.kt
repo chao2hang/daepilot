@@ -1,6 +1,7 @@
 package io.github.daepilot.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,7 +18,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -27,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
@@ -34,6 +40,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.daepilot.core.model.TrafficInfo
+import io.github.daepilot.core.model.ConnectionPhase
+import io.github.daepilot.core.model.ConnectionState
 import io.github.daepilot.ui.Format
 import io.github.daepilot.ui.theme.LocalDaeGlassPalette
 
@@ -183,44 +191,6 @@ fun RowDivider() {
 }
 
 @Composable
-fun StatusBadge(
-    text: String,
-    active: Boolean,
-    modifier: Modifier = Modifier,
-    color: Color? = null,
-) {
-    val tone = color ?: when {
-        active -> LocalDaeGlassPalette.current.success
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(6.dp)
-                .background(tone, CircleShape),
-        )
-        Text(text, style = MaterialTheme.typography.labelMedium, color = tone)
-    }
-}
-
-@Composable
-fun LatencyBadge(millis: Int?, error: String? = null) {
-    val palette = LocalDaeGlassPalette.current
-    val (text, color) = when {
-        millis != null && millis < 100 -> "$millis ms" to palette.success
-        millis != null && millis < 250 -> "$millis ms" to palette.warning
-        millis != null -> "$millis ms" to MaterialTheme.colorScheme.error
-        error != null -> "不可用" to MaterialTheme.colorScheme.outline
-        else -> "未测试" to MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Text(text, style = MaterialTheme.typography.labelMedium, color = color)
-}
-
-@Composable
 fun TrafficBar(traffic: TrafficInfo) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -351,13 +321,142 @@ fun KeyValueRow(
     }
 }
 
+/**
+ * Always-visible outbound strip: exit IP when connected, the live switch phase
+ * while a selection is being applied, and the failure reason otherwise.
+ */
 @Composable
-fun MonoText(text: String, modifier: Modifier = Modifier) {
-    Text(
-        text,
-        modifier = modifier,
-        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-    )
+fun ConnectionBanner(
+    state: ConnectionState,
+    running: Boolean,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!running) return
+    val palette = LocalDaeGlassPalette.current
+    val busy = state.phase == ConnectionPhase.APPLYING ||
+        state.phase == ConnectionPhase.VERIFYING
+    val cnExit = state.phase == ConnectionPhase.CONNECTED && state.exit?.country == "CN"
+    val tone = when {
+        state.phase == ConnectionPhase.FAILED -> MaterialTheme.colorScheme.error
+        cnExit -> palette.warning
+        state.phase == ConnectionPhase.CONNECTED -> palette.success
+        busy -> palette.warning
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val connected = state.phase == ConnectionPhase.CONNECTED
+    val exit = state.exit
+    val place = listOf(exit?.country.orEmpty(), exit?.colo.orEmpty())
+        .filter { it.isNotBlank() }
+        .joinToString(" · ")
+    val meta = buildList {
+        if (place.isNotBlank()) add(place)
+        state.latencyMs?.takeIf { it > 0 }?.let { add("$it ms") }
+        if (state.checkedAt > 0) add(Format.relativeTime(state.checkedAt))
+        if (cnExit) add("国内出口")
+    }.joinToString(" · ")
+    val headline = when (state.phase) {
+        ConnectionPhase.CONNECTED -> "出口"
+        ConnectionPhase.APPLYING -> "正在切换"
+        ConnectionPhase.VERIFYING -> "正在验证出口"
+        ConnectionPhase.FAILED -> "连接异常"
+        ConnectionPhase.STOPPED -> "出口 IP 待刷新"
+    }
+    val line = when (state.phase) {
+        ConnectionPhase.CONNECTED -> meta
+        ConnectionPhase.APPLYING -> "正在应用 ${state.target} 的配置"
+        ConnectionPhase.VERIFYING -> "配置已应用，正在确认出口"
+        ConnectionPhase.FAILED ->
+            listOf(state.target, state.detail.ifBlank { "出口不可达" })
+                .filter { it.isNotBlank() }
+                .joinToString(" · ")
+        ConnectionPhase.STOPPED -> "点击刷新读取当前出口"
+    }
+    val shape = RoundedCornerShape(14.dp)
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(
+                Brush.horizontalGradient(
+                    listOf(
+                        tone.copy(alpha = 0.12f),
+                        MaterialTheme.colorScheme.surface.copy(alpha = 0.62f),
+                    ),
+                ),
+            )
+            .border(0.75.dp, tone.copy(alpha = 0.30f), shape)
+            .padding(start = 14.dp, end = 8.dp, top = 9.dp, bottom = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(tone),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    headline,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (connected) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        tone
+                    },
+                )
+                if (connected) {
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        exit?.ip ?: "出口未知",
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                        ),
+                        color = tone,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            if (line.isNotBlank()) {
+                Text(
+                    line,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 1.dp),
+                )
+            }
+        }
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .padding(horizontal = 8.dp)
+                    .size(13.dp),
+                strokeWidth = 1.8.dp,
+                color = tone,
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onRefresh),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.Refresh,
+                    contentDescription = "刷新出口 IP",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
 }
 
 @Composable

@@ -29,9 +29,6 @@ object ShareLink {
 
     fun encodeBase64(input: ByteArray): String = Base64.getEncoder().encodeToString(input)
 
-    fun encodeBase64Url(input: ByteArray): String =
-        Base64.getUrlEncoder().withoutPadding().encodeToString(input)
-
     /** Protocol scheme as written in the link. */
     fun scheme(link: String): String? =
         link.trim().substringBefore("://", "").takeIf { it.isNotEmpty() }?.lowercase()
@@ -48,13 +45,23 @@ object ShareLink {
 
     /** Display name from the URL fragment, percent-decoded. */
     fun name(link: String): String? {
-        val raw = link.trim().substringAfter('#', "")
-        if (raw.isEmpty()) return null
-        return try {
-            URLDecoder.decode(raw, "UTF-8").trim().ifEmpty { null }
-        } catch (_: Exception) {
-            raw.trim().ifEmpty { null }
+        val trimmed = link.trim()
+        val raw = trimmed.substringAfter('#', "")
+        if (raw.isNotEmpty()) {
+            return try {
+                URLDecoder.decode(raw, "UTF-8").trim().ifEmpty { null }
+            } catch (_: Exception) {
+                raw.trim().ifEmpty { null }
+            }
         }
+        // vmess carries its remark inside the base64 JSON ("ps"), not in a
+        // fragment; without this every vmess node falls back to a generic name.
+        if (scheme(trimmed) == "vmess") {
+            val payload = trimmed.substringAfter("://", "").substringBefore('#')
+            val json = decodeBase64Lenient(payload) ?: return null
+            return extractJsonString(json, "ps")?.trim()?.ifEmpty { null }
+        }
+        return null
     }
 
     /**
@@ -153,7 +160,142 @@ object ShareLink {
     private fun extractJsonString(json: String, key: String): String? {
         val regex = Regex("\"${Regex.escape(key)}\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
         val match = regex.find(json) ?: return null
-        return match.groupValues[1].replace("\\\"", "\"").replace("\\\\", "\\")
+        return unescapeJson(match.groupValues[1])
+    }
+
+    /** Subscription generators often escape non-ASCII as `\uXXXX` in `ps`. */
+    private fun unescapeJson(raw: String): String {
+        if (raw.indexOf('\\') < 0) return raw
+        val out = StringBuilder(raw.length)
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            if (c != '\\' || i == raw.length - 1) {
+                out.append(c)
+                i++
+                continue
+            }
+            when (val next = raw[i + 1]) {
+                '"', '\\', '/' -> { out.append(next); i += 2 }
+                'b' -> { out.append('\b'); i += 2 }
+                'f' -> { out.append('\u000C'); i += 2 }
+                'n' -> { out.append('\n'); i += 2 }
+                'r' -> { out.append('\r'); i += 2 }
+                't' -> { out.append('\t'); i += 2 }
+                'u' -> {
+                    val hex = raw.substring(i + 2, minOf(i + 6, raw.length))
+                    val code = if (hex.length == 4) hex.toIntOrNull(16) else null
+                    if (code != null) {
+                        out.append(code.toChar())
+                        i += 6
+                    } else {
+                        out.append(next)
+                        i += 2
+                    }
+                }
+                else -> { out.append(next); i += 2 }
+            }
+        }
+        return out.toString()
+    }
+
+    /** True when the link negotiates TLS on top of the proxy protocol. */
+    fun usesTls(link: String): Boolean {
+        val trimmed = link.trim()
+        return when (scheme(trimmed)) {
+            "vmess" -> {
+                val json = decodeBase64Lenient(trimmed.substringAfter("://", "").substringBefore('#'))
+                val tls = json?.let { extractJsonString(it, "tls") }?.trim()?.lowercase()
+                !tls.isNullOrEmpty() && tls != "none" && tls != "false"
+            }
+            "vless" -> {
+                val security = queryParam(trimmed, "security")?.lowercase()
+                val tls = queryParam(trimmed, "tls")?.lowercase()
+                security in setOf("tls", "xtls", "reality") || tls in setOf("1", "true", "tls")
+            }
+            "trojan", "anytls" -> true
+            else -> false
+        }
+    }
+
+    /**
+     * Name the server certificate must cover. Null when neither the link nor
+     * the host provides one, so a certificate probe has nothing to verify.
+     */
+    fun tlsServerName(link: String): String? {
+        val trimmed = link.trim()
+        val explicit = when (scheme(trimmed)) {
+            "vmess" -> decodeBase64Lenient(trimmed.substringAfter("://", "").substringBefore('#'))
+                ?.let { json -> extractJsonString(json, "sni") ?: extractJsonString(json, "host") }
+            else -> queryParam(trimmed, "sni")
+                ?: queryParam(trimmed, "peer")
+                ?: queryParam(trimmed, "host")
+        }
+        return explicit?.trim()?.takeIf { it.isNotEmpty() } ?: endpoint(trimmed)?.host
+    }
+
+    private fun queryParam(link: String, key: String): String? {
+        val query = link.substringAfter('?', "").substringBefore('#')
+        if (query.isEmpty()) return null
+        for (part in query.split('&')) {
+            val eq = part.indexOf('=')
+            if (eq <= 0 || !part.substring(0, eq).equals(key, ignoreCase = true)) continue
+            return runCatching { URLDecoder.decode(part.substring(eq + 1), "UTF-8") }.getOrNull()
+        }
+        return null
+    }
+
+    /**
+     * Marks the link so dae skips certificate verification for this node only.
+     *
+     * `global.allow_insecure` stays false: a subscription whose servers use
+     * self-signed certificates would otherwise break every proxied TLS dial
+     * (including DoH), and opening it globally would weaken unrelated nodes.
+     */
+    fun withInsecureTls(link: String): String {
+        val trimmed = link.trim()
+        return when (scheme(trimmed)) {
+            "vmess" -> {
+                if (trimmed.substringAfter("://", "").contains('@')) {
+                    trimmed
+                } else {
+                    setVmessField(trimmed, "allowInsecure", "true") ?: trimmed
+                }
+            }
+            "vless", "trojan" -> setQueryValue(trimmed, "allowInsecure", "1")
+            "hysteria2", "hy2", "anytls" -> setQueryValue(trimmed, "insecure", "1")
+            "tuic" -> setQueryValue(trimmed, "allow_insecure", "1")
+            else -> trimmed
+        }
+    }
+
+    private fun setQueryValue(link: String, key: String, value: String): String {
+        val hashIndex = link.indexOf('#')
+        val fragment = if (hashIndex >= 0) link.substring(hashIndex) else ""
+        val main = if (hashIndex >= 0) link.substring(0, hashIndex) else link
+        val queryIndex = main.indexOf('?')
+        val base = if (queryIndex >= 0) main.substring(0, queryIndex) else main
+        val query = if (queryIndex >= 0) main.substring(queryIndex + 1) else ""
+        val parts = query.split('&')
+            .filter { it.isNotBlank() }
+            .filterNot { it.substringBefore('=').equals(key, ignoreCase = true) }
+        return base + "?" + (parts + "$key=$value").joinToString("&") + fragment
+    }
+
+    private fun setVmessField(link: String, key: String, literal: String): String? {
+        val hashIndex = link.indexOf('#')
+        val fragment = if (hashIndex >= 0) link.substring(hashIndex) else ""
+        val head = if (hashIndex >= 0) link.substring(0, hashIndex) else link
+        val payload = head.substringAfter("://", "")
+        val json = decodeBase64Lenient(payload) ?: return null
+        val field = Regex("\"${Regex.escape(key)}\"\\s*:\\s*(?:true|false|\"(?:\\\\.|[^\"\\\\])*\")")
+        val updated = when {
+            field.containsMatchIn(json) -> field.replace(json, "\"$key\":$literal")
+            json.trimEnd().endsWith("}") ->
+                json.trimEnd().dropLast(1) + ",\"$key\":$literal}"
+            else -> return null
+        }
+        return "vmess://" + encodeBase64(updated.toByteArray(Charsets.UTF_8)) + fragment
     }
 
     /** Build a `scheme://...` URI with percent-encoded credentials. */

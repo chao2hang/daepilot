@@ -65,6 +65,7 @@ import io.github.daepilot.core.model.AppSnapshot
 import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
 import io.github.daepilot.ui.AppViewModel
+import io.github.daepilot.ui.components.BypassAppSheet
 import io.github.daepilot.ui.components.ConfirmDialog
 import io.github.daepilot.ui.components.DiagnosticsDialog
 import io.github.daepilot.ui.components.GroupLabel
@@ -96,7 +97,7 @@ fun SettingsScreen(
 ) {
     var showDiagnostics by remember { mutableStateOf(false) }
     var showPortDialog by remember { mutableStateOf(false) }
-    var showBypassDialog by remember { mutableStateOf(false) }
+    var showBypassSheet by remember { mutableStateOf(false) }
     var showLevelDialog by remember { mutableStateOf(false) }
     var showUploadConfirm by remember { mutableStateOf(false) }
     var showAccentSheet by remember { mutableStateOf(false) }
@@ -205,15 +206,19 @@ fun SettingsScreen(
 
         item { GroupLabel("网络") }
         item {
+            val pnameUnavailable = status.pnameRouting == false ||
+                compatibility?.pnameRouting == false
+            val bypassCount = snapshot.settings.bypassPackages.size
             ListGroup {
                 ListRow(
                     title = "分应用绕过",
-                    description = if (snapshot.settings.bypassPackages.isEmpty()) {
-                        "未设置"
-                    } else {
-                        "${snapshot.settings.bypassPackages.size} 个包名"
+                    description = when {
+                        pnameUnavailable && bypassCount == 0 -> "UID 直连（pname 不可用）"
+                        pnameUnavailable -> "$bypassCount 个应用 · UID 直连"
+                        bypassCount == 0 -> "未设置"
+                        else -> "$bypassCount 个包名"
                     },
-                    onClick = { showBypassDialog = true },
+                    onClick = { showBypassSheet = true },
                     trailing = {
                         Icon(
                             Icons.Outlined.ChevronRight,
@@ -399,14 +404,15 @@ fun SettingsScreen(
         )
     }
 
-    if (showBypassDialog) {
-        BypassDialog(
+    if (showBypassSheet) {
+        BypassAppSheet(
             current = snapshot.settings.bypassPackages,
-            pnameUnavailable = compatibility?.pnameRouting == false,
-            onDismiss = { showBypassDialog = false },
+            pnameUnavailable = status.pnameRouting == false ||
+                compatibility?.pnameRouting == false,
+            onDismiss = { showBypassSheet = false },
             onSave = {
                 viewModel.setBypassPackages(it)
-                showBypassDialog = false
+                showBypassSheet = false
             },
         )
     }
@@ -532,63 +538,6 @@ private fun LogLevelDialog(
         },
         confirmButton = {
             TextButton(onClick = { onSave(selected) }) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
-}
-
-@Composable
-private fun BypassDialog(
-    current: List<String>,
-    pnameUnavailable: Boolean,
-    onDismiss: () -> Unit,
-    onSave: (List<String>) -> Unit,
-) {
-    var text by remember { mutableStateOf(current.joinToString("\n")) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("分应用绕过") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (pnameUnavailable) {
-                    Text(
-                        "本机 dae 未能挂载 cgroup 钩子，pname 规则不会生效——保存后这些进程仍会走代理。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-                Text(
-                    "填写进程名（pname），每行一个，也可用逗号分隔。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("com.example.app\ncom.tencent.mm") },
-                    minLines = 4,
-                    maxLines = 8,
-                    shape = MaterialTheme.shapes.small,
-                )
-                Text(
-                    "Android 进程名最长 15 个字符，超长包名可能无法精确匹配。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    val packages = text
-                        .split(Regex("[\\s,;]+"))
-                        .map { it.trim() }
-                        .filter { it.matches(Regex("[A-Za-z0-9_.:]+")) }
-                        .distinct()
-                    onSave(packages)
-                },
-            ) { Text("保存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )

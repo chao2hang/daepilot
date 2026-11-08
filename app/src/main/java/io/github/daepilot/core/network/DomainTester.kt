@@ -2,11 +2,14 @@ package io.github.daepilot.core.network
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.net.ConnectException
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
@@ -17,6 +20,9 @@ data class DomainTarget(
     val host: String,
     val url: String,
     val expect204: Boolean = false,
+    // Some sites answer a bare probe with 401/403 while still being reachable
+    // through the proxy; those codes still prove the connection works.
+    val allowAuth: Boolean = false,
 )
 
 data class DomainTestResult(
@@ -32,21 +38,22 @@ data class ExitInfo(
     val colo: String,
 )
 
-data class DomainTestReport(
-    val results: List<DomainTestResult>,
-    val exit: ExitInfo?,
-    val node: String?,
-    val proxyRunning: Boolean,
-)
-
 object DomainTargets {
-    val defaults = listOf(
-        DomainTarget("Google", "google.com", "https://www.google.com/generate_204", expect204 = true),
-        DomainTarget("YouTube", "youtube.com", "https://www.youtube.com/"),
-        DomainTarget("GitHub", "github.com", "https://github.com/"),
-        DomainTarget("Telegram", "telegram.org", "https://telegram.org/"),
-        DomainTarget("Baidu", "baidu.com", "https://www.baidu.com/"),
+    val google = DomainTarget(
+        "Google", "google.com", "https://www.google.com/generate_204", expect204 = true,
     )
+    val youtube = DomainTarget("YouTube", "youtube.com", "https://www.youtube.com/")
+    val github = DomainTarget("GitHub", "github.com", "https://github.com/")
+    val telegram = DomainTarget("Telegram", "telegram.org", "https://telegram.org/")
+    val chatgpt = DomainTarget(
+        "ChatGPT", "chatgpt.com", "https://chatgpt.com/", allowAuth = true,
+    )
+    val netflix = DomainTarget("Netflix", "netflix.com", "https://www.netflix.com/")
+    val x = DomainTarget("X", "x.com", "https://x.com/")
+    val baidu = DomainTarget("Baidu", "baidu.com", "https://www.baidu.com/")
+
+    /** The sites a proxy is usually judged by, shown on the home screen. */
+    val home = listOf(google, youtube, github, telegram, chatgpt, netflix, x, baidu)
 }
 
 /**
@@ -59,19 +66,10 @@ object DomainTargets {
  */
 class DomainTester(
     private val client: OkHttpClient = defaultClient(),
-    private val targets: List<DomainTarget> = DomainTargets.defaults,
     private val exitProbeUrl: String = "https://www.cloudflare.com/cdn-cgi/trace",
 ) {
-    suspend fun run(proxyRunning: Boolean, node: String?): DomainTestReport =
-        withContext(Dispatchers.IO) {
-            // Sequential on purpose: a low-bandwidth or rate-limited node turns
-            // five concurrent TLS handshakes into five timeouts and makes a
-            // healthy proxy look broken. One request at a time measures what a
-            // browser would actually see.
-            val exit = runCatching { fetchExit() }.getOrNull()
-            val results = targets.map { target -> probe(target) }
-            DomainTestReport(results, exit, node, proxyRunning)
-        }
+    suspend fun probeOne(target: DomainTarget): DomainTestResult =
+        withContext(Dispatchers.IO) { probe(target) }
 
     internal fun probe(target: DomainTarget): DomainTestResult {
         val started = System.nanoTime()
@@ -84,10 +82,10 @@ class DomainTester(
             }
             response.use {
                 val elapsed = (System.nanoTime() - started) / 1_000_000
-                val ok = if (target.expect204) {
-                    it.code == 204
-                } else {
-                    it.code in 200..399
+                val ok = when {
+                    target.expect204 -> it.code == 204
+                    target.allowAuth -> it.code in 200..399 || it.code == 401 || it.code == 403
+                    else -> it.code in 200..399
                 }
                 DomainTestResult(target, ok, elapsed, "HTTP ${it.code}")
             }
@@ -116,12 +114,12 @@ class DomainTester(
         return ExitInfo(ip, values["loc"].orEmpty(), values["colo"].orEmpty())
     }
 
-    private fun fetchExit(): ExitInfo? {
+    suspend fun fetchExit(): ExitInfo? = withContext(Dispatchers.IO) {
         val request = Request.Builder().url(exitProbeUrl).get().build()
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return null
-            val body = response.body?.string() ?: return null
-            return parseExit(body)
+            if (!response.isSuccessful) return@withContext null
+            val body = response.body?.string() ?: return@withContext null
+            parseExit(body)
         }
     }
 
@@ -133,7 +131,21 @@ class DomainTester(
             .build()
 
     companion object {
+        /**
+         * Probes resolve to IPv4 only when possible: while the tunnel is down
+         * a foreign name can still be reached over a direct IPv6 route, and the
+         * app would then read the carrier's own address from the trace and call
+         * the switch successful.
+         */
+        private val ipv4FirstDns = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                val all = Dns.SYSTEM.lookup(hostname)
+                return all.filter { it is Inet4Address }.ifEmpty { all }
+            }
+        }
+
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .dns(ipv4FirstDns)
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(8, TimeUnit.SECONDS)
             .callTimeout(12, TimeUnit.SECONDS)

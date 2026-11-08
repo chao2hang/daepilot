@@ -41,6 +41,7 @@ object ProxyUriFactory {
         sni: String? = null,
         alpn: List<String> = emptyList(),
         fingerprint: String? = null,
+        allowInsecure: Boolean = false,
     ): String {
         val json = buildString {
             append('{')
@@ -59,6 +60,7 @@ object ProxyUriFactory {
             append("\"sni\":\"").append(jsonEscape(sni ?: "")).append("\",")
             append("\"alpn\":\"").append(jsonEscape(alpn.joinToString(","))).append("\",")
             append("\"fp\":\"").append(jsonEscape(fingerprint ?: "")).append("\"")
+            if (allowInsecure) append(",\"allowInsecure\":true")
             append('}')
         }
         val encoded = Base64.getEncoder().encodeToString(json.toByteArray(Charsets.UTF_8))

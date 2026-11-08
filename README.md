@@ -55,6 +55,11 @@ Magisk module
 - **蜂窝 DNS 回退**：在部分移动网络上，dae 的 DNS 劫持会捕获它自己发往公网 DNS 的查询，导致运营商 DNS 直连超时（原始 UDP 查询正常）。`daepilotctl` 在 WAN 为 `rmnet*` 且存在代理节点时，把 `qname(geosite:cn)` 的解析改走代理的 `googledns`；Wi-Fi 仍使用路由器/运营商 DNS 直连。诊断弹窗会显示当前 WAN、IP、DNS 列表、DNS 模式（直连/国内经代理）、节点与最近错误。
 - **IPv4 节点 AAAA 过滤**：节点没有 IPv6 出口时，Chrome / X 等应用优先使用 AAAA，代理拨号 IPv6 会 `network is unreachable`。存在代理节点时，`daepilotctl` 在 DNS request 中拒绝非国内域名的 AAAA（国内 IPv6 保留），应用自动回退 IPv4；诊断弹窗显示 IPv6 模式。
 - **国内/海外 DNS 分流**：国内域名默认走 `https://223.5.5.5/dns-query`（AliDNS DoH），海外域名走 `https://1.1.1.1/dns-query`（Cloudflare DoH）；两者都不使用 UDP 53。蜂窝下 ctl 只在 `alidns` 仍是 UDP 时才把国内域名回退到 `googledns`，DoH 国内上游会保留 `qname(geosite:cn) -> alidns`，避免运营商 DNS 污染和节点丢弃 UDP 53。旧默认 `udp://119.29.29.29:53` / `tcp+udp://8.8.8.8:53` 会在 App 启动时自动迁移，自定义上游保持不动。可在「分流 → DNS」改成自己的解析器。连通性测试改为串行探测，避免慢节点被五个并发 TLS 握手压垮后误报。
+- **节点域名直解**：节点服务器是海外域名时，dae 的 bootstrap 查询同样会被自己的 DNS 劫持捕获，海外域名走 `googledns` 又要经过尚未建立、且正等待该解析的隧道，结果是 `bootstrap resolver returned no usable address`，整个节点组全灭。渲染时把所有节点服务域名额外指向国内上游（`qname(suffix: 节点域名...) -> alidns`），解析不依赖隧道。
+- **Play 下载走代理**：绕过大陆模板在 `domain(geosite:cn)` 之前把 `services.googleapis.cn`、`gvt1.com`、`gvt2.com`、`dl.google.com` 指向代理分组。Play 的国内下载前端解析到中国移动 GGC 缓存 IP，落在 `geoip:cn` 内会直连，而该直连链路在部分移动网络上稳定 0 B/s，经代理访问同一缓存反而正常。
+- **证书自动判定**：切换后若出口探测失败，App 会用真实 TLS 握手验证当前选择节点的证书（相同 SNI、同一平台信任库）。只有确实被判定为不可信（自签名 / 名称不匹配）的节点才自动打开「跳过证书校验」并重新下发配置，连通性本身失败的节点不会被误开放。
+- **切换成功以真实请求为准**：连接状态只有在站点探测（Google，失败时再用 YouTube 复核）经隧道返回成功后才算成功；Cloudflare trace 只补充出口 IP，并且探测优先解析 IPv4——隧道中断时 trace 仍可能被直连 IPv6 回答，会把失败的切换显示成「已连接 · 出口 …」。
+- **小米超级岛（焦点通知）**：HyperOS 的岛不是应用内控件，而是系统按「焦点通知」渲染的通知栏上方胶囊。App 通过 `Notification.extras` 附带 `miui.focus.param` / `miui.focus.pics`，并先用 `content://miui.statusbar.notification.public` 的 `canShowFocus` / `isSupportIsland` 探测授权，未授权时自动退回普通通知，因此非小米设备也不会异常。系统只放行 xmsf 授权过的应用（`com.xiaomi.xmsf` 的 `auth_database.db`：`apkSigns` 记录签名摘要、`scopeInfos` 的 scope 20032 即焦点通知授权，两者缺一就 `onAuthFailed`），官方途径是给应用申请小米开放平台 AppID；在已 root 的设备上可用 `tools/enable_xiaomi_island.py enable` 直接写入这条本地授权缓存（`status` 查看；root 只能原地覆写该文件、不能截断或换 inode，脚本用 `dd conv=notrunc` 并清空 WAL/SHM 后再重启 xmsf）。撤销授权建议直接清除 xmsf 数据或在 MIUI 通知设置里关闭，`disable` 只删行，xmsf 可能把缓存写回。
 - **Resolver 清洗**：Android `dumpsys` 输出的 DNS 形如 `/10.0.2.3`，写入 `resolv.conf` 前会去掉 `/`、方括号和 zone id；否则整份文件非法，dae 的 Go resolver 会回落到 `[::1]:53`，网络检查/节点解析直接失败。
 - **Wi-Fi / 蜂窝双 WAN**：`wan_interface: auto` 由 `daepilotctl` 从 Android policy routing 解析当前默认接口（`wlan0`、`rmnet_dataN` 等），watchdog 检测到接口变化后自动重启 dae，避免 Wi-Fi/移动数据切换后仍绑定旧接口。模拟器上已验证 Wi-Fi → 移动数据切换后自动 `Bind to WAN: eth0` 并继续代理。
 - **rmnet 兼容**：模块自带的 dae payload 使用 L3 WAN egress hook，适配 Android rmnet 的 raw-IP；官方 L2 构建在 rmnet 上抓不到本地流量，因此不要替换移动网络场景下的 payload。
@@ -129,6 +134,14 @@ Magisk 管理器中的模块「动作」按钮可直接启停 dae。
 
 - 仅支持 arm64 + root；非 root 设备与 iOS 不在范围内。
 - 建议内核 ≥ 5.15 且启用 BTF。部分厂商内核缺少 cgroup2 或 BPF 权限，需自行调整 SELinux；`customize.sh` 会尝试一条非致命的 `magiskpolicy` 规则。
+
+### 已知限制：分应用绕过 / pname
+
+dae 的 `pname` 规则依赖 `BPF_CGROUP_INET_SOCK_CREATE` 的 cgroup 程序。部分 Android 14+/HyperOS 内核上，netd 的 `cgroupsock_inet` 已经占用了这个 attach 类型；再挂载 dae 的程序会返回 `EPERM`。实测在关闭 SELinux 强制、进程拥有完整 capabilities、甚至换到空的子 cgroup 后仍然失败，且当前 SELinux `bpf` 类没有 `link_create` 权限，因此不是靠改策略能解决的。Root 本身也不够：这正是用 root 全权限、Seccomp=0 复现的结果。
+
+因此 DaePilot 的「分应用绕过」不再依赖 pname：App 把所选应用解析成 UID，模块在 netfilter `mangle OUTPUT` 中给这些 UID 的报文打上私有 DSCP（`0x2f`，没有 xt_DSCP 时回退到 TOS），渲染器同时生成 `dscp(0x2f) -> must_direct`。真机已验证同一 UID 在打标前出口为 SG、打标后变为 CN，分应用直连生效。自定义规则里的 `pname(...)` 仍然不可用，只有「分应用绕过」列表走 UID 方案。
+
+dae 的数据面走 TC/eBPF，不是 iptables/nftables TPROXY；`so_mark_from_dae` 是 dae 自己 socket 的 mark，给应用报文打普通 netfilter mark 不会让 dae 跳过。要恢复 pname 本身，需要修改自定义 dae 数据面或 ROM/内核，让 dae 的 cgroup hook 与 netd 共存。
 - hysteria2 / TUIC 基于 QUIC，TCP 延迟测试无法反映真实可用性。
 - 「连通」测试若显示百度可用、Google / YouTube 不可达，且出口地区为 CN，通常表示当前节点没有可用的国际出口（节点隧道本身可能是通的）；请更换节点，这不是 App 的本地代理链路故障。测试串行执行，但低带宽或限速节点仍可能让单次请求超时，重试或换节点即可。
 - Clash / sing-box 转换覆盖常用字段；SSR、WireGuard、Snell 等类型会跳过并在导入结果中给出警告。

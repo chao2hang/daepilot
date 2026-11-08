@@ -38,6 +38,7 @@ data class RuleDraft(
     val preset: String = "",
     val ip: String = "",
     val ports: String = "",
+    val portFilter: String = "",
     val advanced: String = "",
 )
 
@@ -72,8 +73,19 @@ object RuleBuilder {
             RuleKind.ADVANCED -> buildAdvanced(draft)
         }
         if (raw.error != null) return raw
-        val validation = DaeConfigValidator.validateRule(raw.expression)
-        return if (validation.ok) raw else RuleBuild(error = validation.message)
+        val expression = if (
+            draft.kind != RuleKind.PORT &&
+            draft.kind != RuleKind.ADVANCED &&
+            draft.portFilter.isNotBlank()
+        ) {
+            val port = portsExpression(draft.portFilter)
+            if (port.error != null) return port
+            "${raw.expression} && ${port.expression}"
+        } else {
+            raw.expression
+        }
+        val validation = DaeConfigValidator.validateRule(expression)
+        return if (validation.ok) RuleBuild(expression) else RuleBuild(error = validation.message)
     }
 
     private fun buildDomain(draft: RuleDraft): RuleBuild {
@@ -144,8 +156,10 @@ object RuleBuilder {
         return RuleBuild("$function(" + codes.joinToString(", ") { "$prefix:$it" } + ")")
     }
 
-    private fun buildPorts(draft: RuleDraft): RuleBuild {
-        val tokens = tokens(draft.ports)
+    private fun buildPorts(draft: RuleDraft): RuleBuild = portsExpression(draft.ports)
+
+    private fun portsExpression(raw: String): RuleBuild {
+        val tokens = tokens(raw)
         if (tokens.isEmpty()) return RuleBuild(error = "请输入至少一个端口")
         val values = tokens.map { token ->
             normalizePort(token) ?: return RuleBuild(error = "「$token」不是有效端口或端口段")
@@ -165,19 +179,27 @@ object RuleBuilder {
 
     /** Null when the expression is not one of the shapes this editor generates. */
     fun parse(expression: String): RuleDraft? {
-        val call = parseCall(expression) ?: return null
-        return when (call.name) {
+        val split = splitTrailingPort(expression.trim())
+        val base = split?.first ?: expression
+        val portFilter = split?.second
+        val call = parseCall(base) ?: return null
+        val draft = when (call.name) {
             "domain" -> parseDomainCall(call.args)
             "dip" -> parseDipCall(call.args)
             "dport" -> parsePortCall(call.args)
             else -> null
+        } ?: return null
+        if (portFilter != null) {
+            if (draft.kind == RuleKind.PORT || draft.kind == RuleKind.ADVANCED) return null
+            return draft.copy(portFilter = portFilter)
         }
+        return draft
     }
 
     /** Short, human-readable label for rule lists. */
     fun describe(expression: String): String {
         val draft = parse(expression) ?: return expression.trim()
-        return when (draft.kind) {
+        val base = when (draft.kind) {
             RuleKind.DOMAIN -> when (draft.domainMatch) {
                 DomainMatch.SUFFIX -> "域名 · ${draft.domain}"
                 DomainMatch.FULL -> "完整域名 · ${draft.domain}"
@@ -193,6 +215,7 @@ object RuleBuilder {
             RuleKind.PORT -> "端口 · ${draft.ports}"
             RuleKind.ADVANCED -> expression.trim()
         }
+        return if (draft.portFilter.isNotBlank()) "$base · 端口 ${draft.portFilter}" else base
     }
 
     private data class Call(val name: String, val args: List<String>)
@@ -267,6 +290,38 @@ object RuleBuilder {
         val values = args.map { unquote(it) }
         if (values.any { normalizePort(it) == null }) return null
         return RuleDraft(kind = RuleKind.PORT, ports = values.joinToString(", "))
+    }
+
+    /**
+     * Splits `base && dport(...)` so the guided editor can round-trip a rule
+     * that combines a domain/IP with a port. Anything more complex stays in
+     * advanced mode.
+     */
+    private fun splitTrailingPort(expression: String): Pair<String, String>? {
+        var quote: Char? = null
+        var depth = 0
+        var marker = -1
+        var i = 0
+        while (i < expression.length - 1) {
+            val c = expression[i]
+            when {
+                quote != null -> {
+                    if (c == '\\') i++ else if (c == quote) quote = null
+                }
+                c == '\'' || c == '"' -> quote = c
+                c == '(' -> depth++
+                c == ')' -> depth--
+                c == '&' && depth == 0 && expression[i + 1] == '&' -> marker = i
+            }
+            i++
+        }
+        if (marker <= 0) return null
+        val base = expression.substring(0, marker).trim()
+        if (base.isEmpty()) return null
+        val right = expression.substring(marker + 2).trim()
+        val call = parseCall(right) ?: return null
+        if (call.name != "dport") return null
+        return base to call.args.joinToString(", ")
     }
 
     private fun tokens(raw: String): List<String> =

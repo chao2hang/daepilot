@@ -22,15 +22,21 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Numbers
 import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
@@ -69,15 +75,19 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.daepilot.core.config.DaeConfigValidator
+import io.github.daepilot.core.config.DnsUpstreamBuilder
 import io.github.daepilot.core.config.DomainMatch
 import io.github.daepilot.core.config.PresetSource
 import io.github.daepilot.core.config.RuleBuild
 import io.github.daepilot.core.config.RuleBuilder
 import io.github.daepilot.core.config.RuleDraft
 import io.github.daepilot.core.config.RuleKind
+import io.github.daepilot.core.config.UpstreamDraft
+import io.github.daepilot.core.config.UpstreamProtocol
 import io.github.daepilot.core.model.AppSnapshot
 import io.github.daepilot.core.model.GroupPolicy
 import io.github.daepilot.core.model.OutboundGroup
+import io.github.daepilot.core.model.daeKey
 import io.github.daepilot.core.model.RoutingRule
 import io.github.daepilot.core.model.RoutingTemplate
 import io.github.daepilot.ui.AppViewModel
@@ -86,10 +96,16 @@ import io.github.daepilot.ui.components.RowDivider
 import io.github.daepilot.ui.components.ScreenBottom
 import io.github.daepilot.ui.components.ScreenEdge
 import io.github.daepilot.ui.components.ScreenHeader
+import io.github.daepilot.ui.components.GroupEditorSheet
 import io.github.daepilot.ui.components.SectionCard
 
-private val directTargets = listOf("proxy", "direct", "block", "must_direct")
-private val groupNamePattern = Regex("[A-Za-z_][A-Za-z0-9_]{0,63}")
+private data class OutboundOption(
+    val value: String,
+    val label: String,
+    val section: String,
+)
+
+private enum class DnsField { DOMESTIC, FOREIGN }
 
 @Composable
 fun RoutingScreen(
@@ -102,17 +118,47 @@ fun RoutingScreen(
     var ruleEditor by remember { mutableStateOf<RoutingRule?>(null) }
     var showRuleEditor by remember { mutableStateOf(false) }
     var showGroupEditor by remember { mutableStateOf(false) }
+    var editingGroup by remember { mutableStateOf<OutboundGroup?>(null) }
     var deleteRule by remember { mutableStateOf<RoutingRule?>(null) }
     var deleteGroup by remember { mutableStateOf<OutboundGroup?>(null) }
     var domesticDns by remember(snapshot.dns) { mutableStateOf(snapshot.dns.domesticUpstream) }
     var foreignDns by remember(snapshot.dns) { mutableStateOf(snapshot.dns.foreignUpstream) }
     var useDomestic by remember(snapshot.dns) { mutableStateOf(snapshot.dns.useDomesticForCn) }
+    var blockIpv6 by remember(snapshot.dns) { mutableStateOf(snapshot.dns.blockIpv6) }
+    var dnsEditor by remember { mutableStateOf<DnsField?>(null) }
+    val dnsDirty = domesticDns != snapshot.dns.domesticUpstream ||
+        foreignDns != snapshot.dns.foreignUpstream ||
+        useDomestic != snapshot.dns.useDomesticForCn ||
+        blockIpv6 != snapshot.dns.blockIpv6
 
     val customGroups = remember(snapshot.groups) {
         snapshot.groups.filter { it.enabled && !it.builtIn }
     }
-    val targets = remember(customGroups) {
-        (directTargets + customGroups.map { it.name }).distinct()
+    val outboundOptions = remember(customGroups, snapshot) {
+        val defaultGroup = customGroups.firstOrNull { it.id == snapshot.defaultGroupId }
+        val defaultLabel = when {
+            defaultGroup != null -> "默认出口（${defaultGroup.name}）"
+            snapshot.selectedNodeId != null -> "默认出口（单个节点）"
+            else -> "默认出口（自动）"
+        }
+        buildList {
+            add(OutboundOption("proxy", defaultLabel, "基础"))
+            add(OutboundOption("direct", "direct · 直连", "基础"))
+            add(OutboundOption("block", "block · 拒绝", "基础"))
+            add(OutboundOption("must_direct", "must_direct · 强制直连", "基础"))
+            customGroups.forEach { group ->
+                val count = group.nodeIds.count { id -> snapshot.nodes.any { it.id == id } }
+                if (count > 0) {
+                    add(
+                        OutboundOption(
+                            value = group.daeKey(),
+                            label = "${group.name} · $count 节点",
+                            section = "分组",
+                        ),
+                    )
+                }
+            }
+        }
     }
 
     LazyColumn(
@@ -195,7 +241,13 @@ fun RoutingScreen(
                     if (index > 0) RowDivider()
                     RuleRow(
                         rule = rule,
+                        outboundText = describeOutbound(rule.outbound, customGroups, snapshot),
+                        canMoveUp = index > 0,
+                        canMoveDown = index < snapshot.rules.lastIndex,
                         onToggle = { viewModel.setRuleEnabled(rule.id, it) },
+                        onMoveUp = { viewModel.moveRule(rule.id, -1) },
+                        onMoveDown = { viewModel.moveRule(rule.id, 1) },
+                        onDuplicate = { viewModel.duplicateRule(rule.id) },
                         onEdit = {
                             ruleEditor = rule
                             showRuleEditor = true
@@ -210,21 +262,37 @@ fun RoutingScreen(
             SectionCard(
                 title = "自定义分组",
                 action = {
-                    IconButton(onClick = { showGroupEditor = true }) {
+                    IconButton(onClick = {
+                        editingGroup = null
+                        showGroupEditor = true
+                    }) {
                         Icon(Icons.Outlined.Add, contentDescription = "新建分组")
                     }
                 },
             ) {
                 Text(
-                    "BUILT-IN · PROXY / DIRECT / BLOCK",
+                    "默认出口同时是分流的兜底出口",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (customGroups.isEmpty()) {
+                    Text(
+                        "还没有分组，去节点页多选节点即可创建。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
                 customGroups.forEachIndexed { index, group ->
                     if (index > 0) RowDivider()
                     GroupRow(
                         group = group,
                         memberCount = group.nodeIds.count { id -> snapshot.nodes.any { it.id == id } },
+                        isDefault = group.id == snapshot.defaultGroupId,
+                        onEdit = {
+                            editingGroup = group
+                            showGroupEditor = true
+                        },
                         onDelete = { deleteGroup = group },
                     )
                 }
@@ -233,23 +301,15 @@ fun RoutingScreen(
 
         item {
             SectionCard(title = "DNS") {
-                OutlinedTextField(
-                    value = domesticDns,
-                    onValueChange = { domesticDns = it },
-                    label = { Text("国内上游") },
-                    placeholder = { Text("udp://dns.alidns.com:53") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.small,
+                DnsUpstreamRow(
+                    title = "国内上游",
+                    uri = domesticDns,
+                    onClick = { dnsEditor = DnsField.DOMESTIC },
                 )
-                OutlinedTextField(
-                    value = foreignDns,
-                    onValueChange = { foreignDns = it },
-                    label = { Text("国外上游") },
-                    placeholder = { Text("tcp+udp://dns.google:53") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.small,
+                DnsUpstreamRow(
+                    title = "国外上游",
+                    uri = foreignDns,
+                    onClick = { dnsEditor = DnsField.FOREIGN },
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(modifier = Modifier.weight(1f)) {
@@ -258,7 +318,30 @@ fun RoutingScreen(
                     }
                     Switch(checked = useDomestic, onCheckedChange = { useDomestic = it })
                 }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("阻止海外 IPv6", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "避免 IPv4-only 节点卡在 AAAA 查询，推荐开启",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = blockIpv6, onCheckedChange = { blockIpv6 = it })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (dnsDirty) {
+                        Text(
+                            "有未保存的更改",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(end = 10.dp),
+                        )
+                    }
                     OutlinedButton(
                         onClick = {
                             viewModel.saveDns(
@@ -266,10 +349,11 @@ fun RoutingScreen(
                                     domesticUpstream = domesticDns.trim(),
                                     foreignUpstream = foreignDns.trim(),
                                     useDomesticForCn = useDomestic,
+                                    blockIpv6 = blockIpv6,
                                 ),
                             )
                         },
-                        enabled = domesticDns.isNotBlank() && foreignDns.isNotBlank(),
+                        enabled = dnsDirty && domesticDns.isNotBlank() && foreignDns.isNotBlank(),
                         shape = MaterialTheme.shapes.small,
                     ) { Text("保存 DNS") }
                 }
@@ -312,7 +396,7 @@ fun RoutingScreen(
     if (showRuleEditor) {
         RuleEditorSheet(
             existing = ruleEditor,
-            targets = targets,
+            targets = outboundOptions,
             onDismiss = {
                 showRuleEditor = false
                 ruleEditor = null
@@ -326,12 +410,25 @@ fun RoutingScreen(
     }
 
     if (showGroupEditor) {
-        GroupEditorDialog(
+        GroupEditorSheet(
             snapshot = snapshot,
+            existing = editingGroup,
             onDismiss = { showGroupEditor = false },
             onSave = {
                 viewModel.saveGroup(it)
                 showGroupEditor = false
+            },
+        )
+    }
+
+    dnsEditor?.let { field ->
+        DnsUpstreamSheet(
+            title = if (field == DnsField.DOMESTIC) "国内 DNS 上游" else "国外 DNS 上游",
+            current = if (field == DnsField.DOMESTIC) domesticDns else foreignDns,
+            onDismiss = { dnsEditor = null },
+            onSave = { uri ->
+                if (field == DnsField.DOMESTIC) domesticDns = uri else foreignDns = uri
+                dnsEditor = null
             },
         )
     }
@@ -387,7 +484,13 @@ private fun TemplateRow(
 @Composable
 private fun RuleRow(
     rule: RoutingRule,
+    outboundText: String,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
     onToggle: (Boolean) -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onDuplicate: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -422,7 +525,7 @@ private fun RuleRow(
                 )
             }
             Text(
-                "→ ${outboundLabel(rule.outbound)}",
+                "→ $outboundText",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
             )
@@ -432,6 +535,32 @@ private fun RuleRow(
                 Icon(Icons.Outlined.MoreVert, contentDescription = "规则操作")
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("上移") },
+                    leadingIcon = { Icon(Icons.Outlined.ArrowUpward, null) },
+                    enabled = canMoveUp,
+                    onClick = {
+                        menuOpen = false
+                        onMoveUp()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("下移") },
+                    leadingIcon = { Icon(Icons.Outlined.ArrowDownward, null) },
+                    enabled = canMoveDown,
+                    onClick = {
+                        menuOpen = false
+                        onMoveDown()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("复制规则") },
+                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
+                    onClick = {
+                        menuOpen = false
+                        onDuplicate()
+                    },
+                )
                 DropdownMenuItem(
                     text = { Text("编辑规则") },
                     onClick = {
@@ -456,16 +585,35 @@ private fun RuleRow(
 private fun GroupRow(
     group: OutboundGroup,
     memberCount: Int,
+    isDefault: Boolean,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(group.name, style = MaterialTheme.typography.bodyLarge)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(group.name, style = MaterialTheme.typography.bodyLarge)
+                if (isDefault) {
+                    Text(
+                        "默认",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
+            }
             Text(
-                "${group.policy.label} · $memberCount 个节点",
+                group.policy.label + " · " + if (memberCount == 0) "空组" else "$memberCount 个节点",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (memberCount == 0) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
             )
+        }
+        IconButton(onClick = onEdit) {
+            Icon(Icons.Outlined.Edit, contentDescription = "编辑分组")
         }
         IconButton(onClick = onDelete) {
             Icon(Icons.Outlined.Delete, contentDescription = "删除分组")
@@ -477,13 +625,17 @@ private fun GroupRow(
 @Composable
 private fun RuleEditorSheet(
     existing: RoutingRule?,
-    targets: List<String>,
+    targets: List<OutboundOption>,
     onDismiss: () -> Unit,
     onSave: (String, String) -> Unit,
 ) {
     var draft by remember(existing) { mutableStateOf(initialRuleDraft(existing)) }
     var outbound by remember(existing) {
-        mutableStateOf(existing?.outbound?.takeIf { it.isNotBlank() } ?: targets.firstOrNull() ?: "proxy")
+        mutableStateOf(
+            existing?.outbound?.takeIf { value ->
+                targets.any { it.value == value }
+            } ?: targets.firstOrNull()?.value ?: "proxy",
+        )
     }
     var error by remember(existing) { mutableStateOf<String?>(null) }
     var targetMenu by remember { mutableStateOf(false) }
@@ -556,24 +708,52 @@ private fun RuleEditorSheet(
                 RuleKind.ADVANCED -> AdvancedRuleFields(draft, update)
             }
 
+            if (draft.kind == RuleKind.DOMAIN ||
+                draft.kind == RuleKind.IP ||
+                draft.kind == RuleKind.PRESET
+            ) {
+                OutlinedTextField(
+                    value = draft.portFilter,
+                    onValueChange = { update(draft.copy(portFilter = it)) },
+                    label = { Text("限定端口（可选）") },
+                    placeholder = { Text("443, 1000-2000") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.small,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                    supportingText = { Text("留空匹配所有端口；多个用逗号分隔") },
+                )
+            }
+
             RulePreview(built = built, error = shownError, outbound = outbound)
 
             Text("出口", style = MaterialTheme.typography.labelMedium)
+            val selectedLabel = targets.firstOrNull { it.value == outbound }?.label ?: outbound
             Box {
                 OutlinedButton(
                     onClick = { targetMenu = true },
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.small,
                 ) {
-                    Text(outboundLabel(outbound), modifier = Modifier.weight(1f))
+                    Text(selectedLabel, modifier = Modifier.weight(1f))
                     Text("▾")
                 }
                 DropdownMenu(expanded = targetMenu, onDismissRequest = { targetMenu = false }) {
+                    var section: String? = null
                     targets.forEach { target ->
+                        if (target.section != section) {
+                            section = target.section
+                            Text(
+                                target.section,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
                         DropdownMenuItem(
-                            text = { Text(outboundLabel(target)) },
+                            text = { Text(target.label) },
                             onClick = {
-                                outbound = target
+                                outbound = target.value
                                 targetMenu = false
                             },
                         )
@@ -610,12 +790,31 @@ private fun initialRuleDraft(existing: RoutingRule?): RuleDraft {
         ?: RuleDraft(kind = RuleKind.ADVANCED, advanced = existing.expression)
 }
 
-private fun outboundLabel(target: String): String = when (target) {
-    "proxy" -> "proxy · 代理"
+private fun describeOutbound(
+    outbound: String,
+    groups: List<OutboundGroup>,
+    snapshot: AppSnapshot,
+): String = when (outbound) {
     "direct" -> "direct · 直连"
-    "block" -> "block · 阻断"
+    "block" -> "block · 拒绝"
     "must_direct" -> "must_direct · 不劫持 DNS 直连"
-    else -> target
+    "proxy" -> {
+        val group = groups.firstOrNull { it.id == snapshot.defaultGroupId }
+        when {
+            group != null -> "默认出口（${group.name}）"
+            snapshot.selectedNodeId != null -> "默认出口（单个节点）"
+            else -> "默认出口（自动）"
+        }
+    }
+    else -> {
+        val group = groups.firstOrNull { it.daeKey() == outbound || it.name == outbound }
+        if (group != null) {
+            val count = group.nodeIds.count { id -> snapshot.nodes.any { it.id == id } }
+            "${group.name} · $count 节点"
+        } else {
+            "$outbound（未找到）"
+        }
+    }
 }
 
 private fun ruleDraftHasInput(draft: RuleDraft): Boolean = when (draft.kind) {
@@ -861,129 +1060,272 @@ private fun RulePreview(built: RuleBuild, error: String?, outbound: String) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun GroupEditorDialog(
-    snapshot: AppSnapshot,
-    onDismiss: () -> Unit,
-    onSave: (OutboundGroup) -> Unit,
-) {
-    var name by remember { mutableStateOf("") }
-    var policy by remember { mutableStateOf(GroupPolicy.MIN_MOVING_AVG) }
-    var selected by remember { mutableStateOf(setOf<String>()) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var policyMenu by remember { mutableStateOf(false) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("新建分组") },
-        text = {
+private fun DnsUpstreamRow(title: String, uri: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Column(
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = {
-                        name = it
-                        error = null
-                    },
-                    label = { Text("分组名（字母/数字/下划线）") },
-                    placeholder = { Text("HK") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.small,
-                    isError = error != null,
-                    supportingText = error?.let { { Text(it) } },
-                )
-                Text("选择策略", style = MaterialTheme.typography.labelMedium)
-                Box {
-                    OutlinedButton(
-                        onClick = { policyMenu = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = MaterialTheme.shapes.small,
-                    ) {
-                        Text(policy.label, modifier = Modifier.weight(1f))
-                        Text("▾")
-                    }
-                    DropdownMenu(expanded = policyMenu, onDismissRequest = { policyMenu = false }) {
-                        GroupPolicy.entries.forEach { option ->
-                            DropdownMenuItem(
-                                text = { Text(option.label) },
-                                onClick = {
-                                    policy = option
-                                    policyMenu = false
-                                },
-                            )
-                        }
-                    }
-                }
                 Text(
-                    "节点（已选 ${selected.size}）",
+                    title,
                     style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (snapshot.nodes.isEmpty()) {
+                Text(
+                    DnsUpstreamBuilder.describe(uri),
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    uri,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Icon(
+                Icons.Outlined.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun DnsUpstreamSheet(
+    title: String,
+    current: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var draft by remember { mutableStateOf(DnsUpstreamBuilder.parse(current)) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val built = remember(draft) { DnsUpstreamBuilder.build(draft) }
+    val shownError = error ?: built.error?.takeIf {
+        if (draft.advanced) draft.raw.isNotBlank() else draft.host.isNotBlank()
+    }
+    val update: (UpstreamDraft) -> Unit = {
+        draft = it
+        error = null
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        dragHandle = {
+            BottomSheetDefaults.DragHandle(
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+            )
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 22.dp, end = 22.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.headlineSmall)
                     Text(
-                        "节点库为空，请先在订阅页导入。",
+                        "选预设或手动填写，支持 DoH / DoT / UDP / TCP",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
                     )
                 }
-                snapshot.nodes.forEach { node ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                selected = if (node.id in selected) selected - node.id else selected + node.id
-                            },
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            checked = node.id in selected,
-                            onCheckedChange = { checked ->
-                                selected = if (checked) selected + node.id else selected - node.id
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Outlined.Close, contentDescription = "关闭")
+                }
+            }
+
+            Text("常用预设", style = MaterialTheme.typography.labelMedium)
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                DnsUpstreamBuilder.presets.forEach { preset ->
+                    FilterChip(
+                        selected = !draft.advanced && built.ok && built.uri == preset.uri,
+                        onClick = { update(DnsUpstreamBuilder.parse(preset.uri)) },
+                        label = { Text(preset.name) },
+                    )
+                }
+            }
+
+            Text("连接方式", style = MaterialTheme.typography.labelMedium)
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                UpstreamProtocol.entries.forEach { protocol ->
+                    FilterChip(
+                        selected = !draft.advanced && draft.protocol == protocol,
+                        onClick = {
+                            val next = if (draft.advanced) {
+                                val parsed = DnsUpstreamBuilder.parse(draft.raw)
+                                if (!parsed.advanced) parsed.copy(protocol = protocol) else {
+                                    draft.copy(advanced = false, protocol = protocol)
+                                }
+                            } else {
+                                draft.copy(protocol = protocol)
+                            }
+                            update(
+                                next.copy(
+                                    path = if (protocol == UpstreamProtocol.DOH && next.path.isBlank()) {
+                                        "/dns-query"
+                                    } else {
+                                        next.path
+                                    },
+                                ),
+                            )
+                        },
+                        label = { Text(protocol.label) },
+                    )
+                }
+                FilterChip(
+                    selected = draft.advanced,
+                    onClick = {
+                        update(
+                            draft.copy(
+                                advanced = true,
+                                raw = draft.raw.ifBlank { built.uri },
+                            ),
+                        )
+                    },
+                    label = { Text("原始 URL") },
+                )
+            }
+
+            if (draft.advanced) {
+                OutlinedTextField(
+                    value = draft.raw,
+                    onValueChange = { update(draft.copy(raw = it)) },
+                    label = { Text("上游 URL") },
+                    placeholder = { Text("https://dns.example/dns-query") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.small,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                    supportingText = { Text("支持 dae 的所有上游协议，例如 h3://") },
+                )
+            } else {
+                OutlinedTextField(
+                    value = draft.host,
+                    onValueChange = { update(draft.copy(host = it)) },
+                    label = { Text("服务器") },
+                    placeholder = { Text("223.5.5.5 或 dns.example.com") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.small,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                )
+                OutlinedTextField(
+                    value = draft.port,
+                    onValueChange = { update(draft.copy(port = it)) },
+                    label = { Text("端口（可选）") },
+                    placeholder = { Text("默认 ${draft.protocol.defaultPort}") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.small,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                if (draft.protocol == UpstreamProtocol.DOH) {
+                    OutlinedTextField(
+                        value = draft.path,
+                        onValueChange = { update(draft.copy(path = it)) },
+                        label = { Text("DoH 路径") },
+                        placeholder = { Text("/dns-query") },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.small,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        "将写入配置",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (shownError != null) {
+                        Text(
+                            shownError,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    } else {
+                        Text(
+                            built.uri.ifBlank { "填写服务器地址后自动生成" },
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = if (built.ok) {
+                                MaterialTheme.colorScheme.onSurface
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
                             },
                         )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                node.name,
-                                style = MaterialTheme.typography.bodySmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            node.endpoint?.host?.let {
-                                Text(
-                                    it,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
                     }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    val trimmed = name.trim()
-                    when {
-                        !groupNamePattern.matches(trimmed) ->
-                            error = "分组名需以字母或下划线开头，仅含字母、数字、下划线"
-                        selected.isEmpty() -> error = "至少选择一个节点"
-                        else -> onSave(
-                            OutboundGroup(
-                                id = java.util.UUID.randomUUID().toString(),
-                                name = trimmed,
-                                policy = policy,
-                                nodeIds = selected.toList(),
-                            ),
-                        )
-                    }
-                },
-            ) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                    shape = MaterialTheme.shapes.small,
+                ) { Text("取消") }
+                Button(
+                    onClick = {
+                        val result = DnsUpstreamBuilder.build(draft)
+                        if (!result.ok) {
+                            error = result.error ?: "DNS 上游无效"
+                        } else {
+                            onSave(result.uri)
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = MaterialTheme.shapes.small,
+                ) { Text("使用此上游") }
+            }
+        }
+    }
 }
 
 @Composable

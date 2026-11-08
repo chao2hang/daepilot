@@ -36,19 +36,6 @@ object Format {
         }
     }
 
-    fun duration(seconds: Long): String {
-        if (seconds <= 0) return "0 秒"
-        val days = seconds / 86400
-        val hours = (seconds % 86400) / 3600
-        val minutes = (seconds % 3600) / 60
-        return when {
-            days > 0 -> "${days}天${hours}小时"
-            hours > 0 -> "${hours}小时${minutes}分"
-            minutes > 0 -> "${minutes}分${seconds % 60}秒"
-            else -> "${seconds}秒"
-        }
-    }
-
     fun expiry(epochSeconds: Long): String {
         if (epochSeconds <= 0) return "未知"
         return dateTime.format(
@@ -57,4 +44,18 @@ object Format {
     }
 
     fun memory(kb: Long): String = if (kb <= 0) "—" else bytes(kb * 1024)
+
+    fun mbps(value: Double?): String =
+        if (value == null || value <= 0 || !value.isFinite()) {
+            "—"
+        } else {
+            String.format(Locale.getDefault(), "%.1f", value)
+        }
+
+    fun percent(value: Double?): String =
+        if (value == null || value < 0 || !value.isFinite()) {
+            "—"
+        } else {
+            String.format(Locale.getDefault(), "%.1f%%", value)
+        }
 }

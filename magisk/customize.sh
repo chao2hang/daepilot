@@ -90,9 +90,11 @@ set_perm "$MODPATH/uninstall.sh" 0 0 0755
 # SELinux policy for the bpf() syscalls dae needs. sepolicy.rule is what applies
 # on every boot; this --live call only makes the grant effective for the boot
 # the module was flashed in, so the user does not have to reboot first. Failure
-# is non-fatal: some kernels already allow these without a rule.
+# is non-fatal: some kernels already allow these without a rule. MagiskPolicy
+# statements are space-separated (`allow source target class perms`; `self:bpf`
+# is invalid and silently does nothing).
 if command -v magiskpolicy >/dev/null 2>&1; then
-  magiskpolicy --live "allow magiskdomain self:bpf { map_create map_read map_write prog_load prog_run }" 2>/dev/null || true
+  magiskpolicy --live "allow magisk magisk bpf { map_create map_read map_write prog_load prog_run }" 2>/dev/null || true
 fi
 
 ui_print "— 数据面已安装；开机自启由 App 中的开关控制"

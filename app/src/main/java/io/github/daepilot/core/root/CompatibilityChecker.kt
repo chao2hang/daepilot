@@ -93,15 +93,6 @@ class CompatibilityChecker(private val root: RootShell) {
         )
     }
 
-    /**
-     * The module is optional for a first look at compatibility: the app can
-     * still show why the data plane is unavailable without it.
-     */
-    suspend fun checkWithoutRoot(): CompatibilityReport = CompatibilityReport(
-        rootAvailable = false,
-        note = "未获得 root 权限，无法读取内核信息",
-    )
-
     companion object {
         const val MIN_MEMORY_MB = 150L
 
