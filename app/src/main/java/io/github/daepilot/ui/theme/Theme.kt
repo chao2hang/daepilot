@@ -34,6 +34,7 @@ data class DaeGlassPalette(
     val glassBottom: Color,
     val borderTop: Color,
     val borderBottom: Color,
+    val innerHighlight: Color,
     val shadow: Color,
     val glow: Color,
     val dockTint: Color,

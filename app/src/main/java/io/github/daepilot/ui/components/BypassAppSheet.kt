@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -22,7 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -115,7 +115,7 @@ fun BypassAppSheet(
         sheetState = sheetState,
         containerColor = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        shape = RoundedCornerShape(topStart = DaeGlassRadius, topEnd = DaeGlassRadius),
         dragHandle = {
             BottomSheetDefaults.DragHandle(
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
@@ -158,19 +158,20 @@ fun BypassAppSheet(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            OutlinedTextField(
+            GlassSearchField(
                 value = query,
                 onValueChange = { query = it },
-                label = { Text("搜索应用或包名") },
-                leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
-                singleLine = true,
+                placeholder = "搜索应用或包名",
                 modifier = Modifier.fillMaxWidth(),
-                shape = MaterialTheme.shapes.small,
             )
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "已选 ${selected.size} 个",
+                    if (catalog.isEmpty()) {
+                        "已选 ${selected.size} 个"
+                    } else {
+                        "已选 ${selected.size} / 共 ${catalog.size} 个"
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -312,7 +313,8 @@ private fun AppPickRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onToggle)
-            .padding(vertical = 7.dp),
+            .heightIn(min = 48.dp)
+            .padding(horizontal = 4.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Checkbox(checked = selected, onCheckedChange = { onToggle() })

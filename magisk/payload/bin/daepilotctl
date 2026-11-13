@@ -46,6 +46,11 @@ WAN_CANDIDATE_COUNT="$RUN/wan.candidate.count"
 NODE_HOSTS_CACHE="$RUN/node.hosts"
 BYPASS_UIDS="$RUN/bypass_uids"
 BYPASS_CHAIN="daepilot_bypass"
+LAN_FILE="$RUN/lan.interfaces"
+LAN_AUTO="$RUN/lan.auto"
+LAN_HOOK_STATE="$RUN/lan.hook"
+LAN_CANDIDATE="$RUN/lan.candidate"
+LAN_CANDIDATE_COUNT="$RUN/lan.candidate.count"
 # Keep in sync with DaeConfigRenderer.BYPASS_DSCP (0x2f). The TOS fallback
 # writes the same DSCP field (0x2f << 2 = 0xbc) on kernels without xt_DSCP.
 BYPASS_DSCP="0x2f"
@@ -381,6 +386,135 @@ detect_wan_interface() {
   printf '%s\n' "$dev"
 }
 
+# Tethered clients (Wi-Fi hotspot, USB/Bluetooth tethering) are FORWARD-path
+# traffic: they never create a local socket, so dae's socket and WAN hooks do
+# not see them. Only lan_interface -- TC ingress on the downstream interface --
+# can capture them, which is what these helpers resolve and keep attachable.
+lan_iface_usable() {
+  local dev wan
+  dev="$1"
+  wan="$2"
+  [ -n "$dev" ] || return 1
+  [ "$dev" = "$wan" ] && return 1
+  case "$dev" in
+    lo|dummy*|dae0*|tun*|tap*|wg*|p2p*|wifi-aware*|rmnet*|clat*|veth*|ifb*|br*)
+      return 1 ;;
+  esac
+  # ",UP" rather than "UP": LOWER_UP alone must not pass for a live link.
+  ip link show "$dev" 2>/dev/null | grep -q '[<,]UP[,>]' || return 1
+  ip -4 addr show dev "$dev" 2>/dev/null | grep -q "inet " || return 1
+  return 0
+}
+
+# Print the downstream interfaces Android is sharing through, comma-separated
+# (dae splits that into a list). Empty when nothing is being shared.
+detect_lan_interfaces() {
+  local wan cand dev ap line out seen have_iw
+  have ip || return 0
+  wan="$(detect_wan_interface 2>/dev/null)"
+  [ -n "$wan" ] || wan="$(head -n 1 "$WAN_FILE" 2>/dev/null)"
+  cand=""
+  have_iw=0
+  if have iw; then
+    have_iw=1
+    # HyperOS names the AP wlan2 and the station wlan0, so the interface name
+    # cannot tell them apart; only the operational type can.
+    ap=""
+    while read -r line; do
+      case "$line" in
+        *"Interface "*) ap="${line##*Interface }" ;;
+        *"type AP"*) [ -n "$ap" ] && cand="$cand $ap" ;;
+      esac
+    done <<EOF
+$(iw dev 2>/dev/null)
+EOF
+  fi
+  for dev in $(ip -o link show 2>/dev/null | sed -n 's/^[0-9]*: \([^:@]*\)[@:].*/\1/p'); do
+    case "$dev" in
+      usb[0-9]*|rndis[0-9]*|ncm[0-9]*|bt-pan*) cand="$cand $dev" ;;
+      # Without iw the only signal left is a live Wi-Fi interface that is not
+      # the WAN: the station is the WAN whenever Wi-Fi is the default network.
+      wlan[0-9]*) [ "$have_iw" = "1" ] || cand="$cand $dev" ;;
+    esac
+  done
+  out=""
+  seen=" "
+  for dev in $cand; do
+    lan_iface_usable "$dev" "$wan" || continue
+    case "$seen" in *" $dev "*) continue ;; esac
+    seen="$seen$dev "
+    out="${out:+$out,}$dev"
+  done
+  printf '%s\n' "$out"
+}
+
+# Android's tethering BPF offload installs classic clsact filters on the AP
+# interface. dae attaches its LAN hook through TCX, and the kernel rejects that
+# attach with EINVAL while classic filters exist -- dae then exits and takes the
+# whole proxy down. Drop only the offload programs (never dae's own TCX links);
+# forwarding keeps working through netd's iptables path, without offload.
+clear_offload_filters() {
+  local dev hook pref prefs
+  have tc || return 0
+  for dev in "$@"; do
+    [ -n "$dev" ] || continue
+    for hook in ingress egress; do
+      prefs="$(tc filter show dev "$dev" "$hook" 2>/dev/null \
+        | sed -n '/prog_offload_schedcls_tether/ s/.*pref \([0-9]*\).*/\1/p' | sort -un)"
+      for pref in $prefs; do
+        case "$pref" in ''|*[!0-9]*) continue ;; esac
+        tc filter del dev "$dev" "$hook" pref "$pref" 2>/dev/null || true
+      done
+    done
+  done
+}
+
+# Clear the offload filters on every interface the staged config binds as LAN.
+prepare_lan_hooks() {
+  local lan dev
+  lan="$(sed -n 's/^[[:space:]]*lan_interface:[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+    "$ROOTFS/config/config.dae" 2>/dev/null | head -n 1)"
+  case "$lan" in ""|auto) return 0 ;; esac
+  for dev in $(printf '%s' "$lan" | tr ',' ' '); do
+    clear_offload_filters "$dev"
+  done
+}
+
+# Resolve the app's "lan_interface: auto" against the interfaces Android is
+# really sharing through. With nothing shared the line is dropped instead of
+# left as "auto": dae cannot bind a name that does not exist.
+normalize_lan_config() {
+  local file lan tmp
+  file="$1"
+  grep -qE '^[[:space:]]*lan_interface:[[:space:]]*auto[[:space:]]*$' "$file" 2>/dev/null || return 0
+  lan="$(detect_lan_interfaces 2>/dev/null)"
+  tmp="$file.lan.$$"
+  if [ -n "$lan" ]; then
+    sed "s/^\([[:space:]]*lan_interface:\).*/\1 $lan/" "$file" > "$tmp" 2>/dev/null \
+      || { rm -f "$tmp" 2>/dev/null; return 0; }
+  else
+    sed '/^[[:space:]]*lan_interface:/d' "$file" > "$tmp" 2>/dev/null \
+      || { rm -f "$tmp" 2>/dev/null; return 0; }
+  fi
+  if [ -s "$tmp" ] && mv "$tmp" "$file" 2>/dev/null; then
+    chmod 600 "$file" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+}
+
+strip_lan_config() {
+  local file tmp
+  file="$1"
+  tmp="$file.nolan.$$"
+  if sed '/^[[:space:]]*lan_interface:/d' "$file" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    mv "$tmp" "$file" 2>/dev/null
+    chmod 600 "$file" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+}
+
 # The saved config contains the concrete WAN from the last apply. Android can
 # rename the cellular interface across boots (rmnet_data1 -> rmnet_data3), so
 # a boot start otherwise binds an interface that has no address. Refresh the
@@ -541,6 +675,7 @@ stage_config() {
       pin_node_urls "$dst"
       apply_cellular_dns_mode "$dst" "$wan"
       apply_ipv4_only_dns "$dst"
+      normalize_lan_config "$dst"
       return 0
     fi
     rm -f "$tmp" 2>/dev/null
@@ -549,6 +684,7 @@ stage_config() {
   cp "$src" "$dst"
   apply_cellular_dns_mode "$dst" "$wan"
   apply_ipv4_only_dns "$dst"
+  normalize_lan_config "$dst"
 }
 
 # Hostnames referenced by the proxy group, one per line. Shared by the hosts
@@ -670,6 +806,25 @@ record_wan_binding() {
     0) rm -f "$WAN_AUTO" 2>/dev/null ;;
   esac
   rm -f "$WAN_CANDIDATE" "$WAN_CANDIDATE_COUNT" 2>/dev/null
+}
+
+# Same record for the LAN side. Unlike the WAN, "auto" is only ever resolved in
+# the staged copy, so $CONF keeps the app's intent and no heal logic is needed.
+record_lan_binding() {
+  local lan auto
+  auto="${1:-}"
+  lan="$(sed -n 's/^[[:space:]]*lan_interface:[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+    "$ROOTFS/config/config.dae" 2>/dev/null | head -n 1)"
+  if [ -n "$lan" ] && [ "$lan" != "auto" ]; then
+    printf '%s\n' "$lan" > "$LAN_FILE" 2>/dev/null
+  else
+    rm -f "$LAN_FILE" "$LAN_HOOK_STATE" 2>/dev/null
+  fi
+  case "$auto" in
+    1) : > "$LAN_AUTO" 2>/dev/null ;;
+    0) rm -f "$LAN_AUTO" "$LAN_HOOK_STATE" 2>/dev/null ;;
+  esac
+  rm -f "$LAN_CANDIDATE" "$LAN_CANDIDATE_COUNT" 2>/dev/null
 }
 
 # dae looks for geosite.dat/geoip.dat next to the config file. The copies are
@@ -1030,6 +1185,78 @@ warmup_proxy_async() {
   fi
 }
 
+# A crashed instance can leave its dae0 link behind; attaching the TC hook to
+# it then fails with "attach tcx link: no such device" and dae exits.
+remove_stale_dae_links() {
+  have ip || return 0
+  local link
+  for link in dae0 dae0peer; do
+    if ip link show "$link" >/dev/null 2>&1; then
+      ip link del "$link" 2>/dev/null || true
+    fi
+  done
+}
+
+# Launch dae in its own mount namespace and wait until it stays up. The chroot
+# mounts are created by __run_in_ns inside that namespace and are destroyed
+# automatically when the daemon exits; nothing is mounted in (or unmounted
+# from) the host. Sets $pid and $log_mark (where this attempt's log begins).
+launch_dae_process() {
+  local i launched
+  rm -f "$DAE_PID" "$HOST_PID" 2>/dev/null
+  log_mark="$(wc -l < "$LOG" 2>/dev/null | tr -dc '0-9')"
+  case "$log_mark" in ''|*[!0-9]*) log_mark=0 ;; esac
+  printf '\n=== %s start ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG"
+  if [ -n "$BB" ]; then
+    "$BB" setsid "$BB" unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp 9>&- >> "$LOG" 2>&1 &
+  elif have setsid; then
+    setsid unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp 9>&- >> "$LOG" 2>&1 &
+  else
+    unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp 9>&- >> "$LOG" 2>&1 &
+  fi
+  launched=$!
+  echo "$launched" > "$HOST_PID"
+
+  # dae writes /var/run/dae.pid inside the chroot; prefer that pid because
+  # setsid may fork and make $! the parent that exits immediately.
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if is_running; then
+      pid="$(daemon_pid)"
+      echo "$pid" > "$HOST_PID"
+      sleep 1
+      is_running && return 0
+      break
+    fi
+    # A fatal hook/config error exits dae at once; waiting the full 10 s would
+    # triple the downtime of the LAN degrade path below.
+    if tail -n +"$((log_mark + 1))" "$LOG" 2>/dev/null | grep -q 'FATAL'; then
+      break
+    fi
+    sleep 0.5 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# dae reports a LAN bind problem in the log of the current attempt. A rejected
+# TCX attach is fatal, but the kernel-version gate only warns and leaves dae
+# running without LAN capture, so the log is the authoritative signal.
+lan_attach_failed() {
+  [ -n "$lan_bound" ] || return 1
+  tail -n +"$((log_mark + 1))" "$LOG" 2>/dev/null \
+    | grep -qE 'does not support bind to LAN|attach TC hook dae_lan'
+}
+
+# Stop a half-started instance and restore what the next launch needs.
+relaunch_prep() {
+  is_running && stop_daemon
+  remove_stale_dae_links
+  ensure_dae_route >/dev/null 2>&1 || true
+  apply_bypass_marks
+  return 0
+}
+
 start_daemon() {
   ctl_lock
   ensure_layout
@@ -1064,17 +1291,16 @@ start_daemon() {
     [ -n "$saved" ] && [ "$saved" = "$current" ] && wan_auto=1
   fi
   refresh_wan_config "$CONF"
+  # Hotspot/USB sharing intent. Only the staged copy is resolved to concrete
+  # interfaces, so $CONF keeps "auto" and the intent survives every restart.
+  lan_auto=0
+  if grep -qE '^[[:space:]]*lan_interface:[[:space:]]*auto' "$CONF" 2>/dev/null \
+      || [ -f "$LAN_AUTO" ]; then
+    lan_auto=1
+  fi
   # Recover a fwmark rule left behind by a crash/reboot before revalidating.
   remove_dae_route
-  # A crashed instance can leave its dae0 link behind; attaching the TC hook
-  # to it then fails with "attach tcx link: no such device" and dae exits.
-  if have ip; then
-    for link in dae0 dae0peer; do
-      if ip link show "$link" >/dev/null 2>&1; then
-        ip link del "$link" 2>/dev/null || true
-      fi
-    done
-  fi
+  remove_stale_dae_links
   [ -f "$CONF" ] || { fail "尚未生成配置，请先在 App 中应用配置"; return 1; }
 
   prepare_chroot || return 1
@@ -1091,6 +1317,11 @@ start_daemon() {
   # Remember what the daemon actually bound. The watchdog restarts it when
   # Android switches networks (Wi-Fi <-> cellular) and the interface changes.
   record_wan_binding "$wan_auto"
+  record_lan_binding "$lan_auto"
+  lan_bound="$(head -n 1 "$LAN_FILE" 2>/dev/null)"
+  # netd installs the tethering offload filters whenever sharing is configured;
+  # they must be gone before dae attaches its LAN hook.
+  prepare_lan_hooks
 
   # dae marks its own sockets 0x100 to avoid self-capture. Android policy
   # routing needs an explicit lookup for that mark, otherwise the socket may
@@ -1100,42 +1331,41 @@ start_daemon() {
 
   raise_memlock
   rotate_log
-  rm -f "$DAE_PID" "$HOST_PID" 2>/dev/null
   say "starting dae (chroot $ROOTFS)"
-  printf '\n=== %s start ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG"
-
-  # dae lives in its own mount namespace. The chroot mounts are created by
-  # __run_in_ns inside that namespace and are destroyed automatically when
-  # the daemon exits; nothing is mounted in (or unmounted from) the host.
-  if [ -n "$BB" ]; then
-    "$BB" setsid "$BB" unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp 9>&- >> "$LOG" 2>&1 &
-  elif have setsid; then
-    setsid unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp 9>&- >> "$LOG" 2>&1 &
-  else
-    unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp 9>&- >> "$LOG" 2>&1 &
+  if launch_dae_process && ! lan_attach_failed; then
+    clear_error
+    [ -n "$lan_bound" ] && echo ok > "$LAN_HOOK_STATE" 2>/dev/null
+    say "running (pid $pid)"
+    warmup_proxy_async
+    return 0
   fi
-  launched=$!
-  echo "$launched" > "$HOST_PID"
 
-  # dae writes /var/run/dae.pid inside the chroot; prefer that pid because
-  # setsid may fork and make $! the parent that exits immediately.
-  i=0
-  while [ "$i" -lt 20 ]; do
-    if is_running; then
-      pid="$(daemon_pid)"
-      echo "$pid" > "$HOST_PID"
-      sleep 1
-      if is_running; then
-        clear_error
-        say "running (pid $pid)"
-        warmup_proxy_async
-        return 0
-      fi
-      break
+  # A LAN bind failure must not take the whole proxy down: the phone keeps its
+  # proxy and only the tethered clients lose it. Retry once with the offload
+  # filters cleared again (netd re-adds them), then start without LAN at all.
+  if [ -n "$lan_bound" ]; then
+    relaunch_prep
+    say "热点接口 $lan_bound 绑定失败，清理 tethering offload 后重试"
+    clear_offload_filters $(printf '%s' "$lan_bound" | tr ',' ' ')
+    if launch_dae_process && ! lan_attach_failed; then
+      clear_error
+      echo ok > "$LAN_HOOK_STATE" 2>/dev/null
+      say "running (pid $pid)"
+      warmup_proxy_async
+      return 0
     fi
-    sleep 0.5 2>/dev/null || sleep 1
-    i=$((i + 1))
-  done
+    relaunch_prep
+    strip_lan_config "$ROOTFS/config/config.dae"
+    lan_bound=""
+    echo failed > "$LAN_HOOK_STATE" 2>/dev/null
+    say "热点接口仍无法绑定，降级为仅本机代理（热点共享不可用）"
+    if launch_dae_process; then
+      clear_error
+      say "running (pid $pid，热点共享不可用)"
+      warmup_proxy_async
+      return 0
+    fi
+  fi
 
   tail -n 20 "$LOG" 2>/dev/null >&2
   remove_dae_route
@@ -1222,8 +1452,17 @@ do_reload() {
   else
     record_wan_binding 0
   fi
+  if grep -qE '^[[:space:]]*lan_interface:[[:space:]]*auto' "$CONF" 2>/dev/null; then
+    record_lan_binding 1
+  else
+    record_lan_binding 0
+  fi
+  lan_bound="$(head -n 1 "$LAN_FILE" 2>/dev/null)"
+  prepare_lan_hooks
   ensure_dae_route || return 1
   apply_bypass_marks
+  log_mark="$(wc -l < "$LOG" 2>/dev/null | tr -dc '0-9')"
+  case "$log_mark" in ''|*[!0-9]*) log_mark=0 ;; esac
   # Run the reload CLI in a private mount namespace as well: it needs the
   # chroot's /proc and /dev, which no longer exist in the host namespace.
   if have timeout; then
@@ -1242,6 +1481,14 @@ do_reload() {
     return 1
   fi
   clear_error
+  if [ -n "$lan_bound" ]; then
+    if lan_attach_failed; then
+      echo failed > "$LAN_HOOK_STATE" 2>/dev/null
+      say "热点接口绑定失败，本机代理不受影响"
+    else
+      echo ok > "$LAN_HOOK_STATE" 2>/dev/null
+    fi
+  fi
   return 0
 }
 
@@ -1414,6 +1661,38 @@ EOF
           ensure_dae_route >/dev/null 2>&1 || true
         fi
       fi
+      # LAN uses the same two-check debounce. dae binds LAN only at startup, so
+      # a hotspot/USB tethering change needs a restart; waiting two checks also
+      # lets Android finish configuring the interface before dae attaches.
+      if [ -f "$LAN_AUTO" ] && is_running; then
+        current_lan="$(detect_lan_interfaces 2>/dev/null)"
+        bound_lan="$(head -n 1 "$LAN_FILE" 2>/dev/null)"
+        if [ "$current_lan" != "$bound_lan" ]; then
+          lan_candidate="$(head -n 1 "$LAN_CANDIDATE" 2>/dev/null)"
+          lan_count="$(head -n 1 "$LAN_CANDIDATE_COUNT" 2>/dev/null)"
+          case "$lan_count" in ''|*[!0-9]*) lan_count=0 ;; esac
+          if [ "$lan_candidate" = "$current_lan" ]; then
+            lan_count=$((lan_count + 1))
+          else
+            lan_candidate="$current_lan"
+            lan_count=1
+          fi
+          printf '%s\n' "$lan_candidate" > "$LAN_CANDIDATE" 2>/dev/null
+          printf '%s\n' "$lan_count" > "$LAN_CANDIDATE_COUNT" 2>/dev/null
+          if [ "$lan_count" -ge 2 ]; then
+            rotate_watch_log
+            say "[$(date '+%Y-%m-%d %H:%M:%S')] LAN changed (${bound_lan:-none} -> ${current_lan:-none}), restarting"
+            rm -f "$LAN_CANDIDATE" "$LAN_CANDIDATE_COUNT" 2>/dev/null
+            stop_daemon
+            start_daemon >> "$WLOG" 2>&1
+          fi
+        else
+          rm -f "$LAN_CANDIDATE" "$LAN_CANDIDATE_COUNT" 2>/dev/null
+          # netd re-adds the offload filters whenever sharing is reconfigured.
+          # They cannot detach a live TCX link, but they block the next attach.
+          prepare_lan_hooks
+        fi
+      fi
     fi
     sleep 15
   done
@@ -1516,6 +1795,28 @@ $(ip -4 addr show dev "$wan" 2>/dev/null)
 EOF
   fi
   echo "wan_ip=$wan_ip"
+  lan=""
+  [ -f "$LAN_FILE" ] && read -r lan < "$LAN_FILE" 2>/dev/null
+  echo "lan=$lan"
+  lan_hook=absent
+  lan_clients=0
+  if [ -n "$lan" ] && [ -n "$pid" ]; then
+    lan_hook=ok
+    if [ -f "$LAN_HOOK_STATE" ]; then
+      state=""
+      read -r state < "$LAN_HOOK_STATE" 2>/dev/null
+      [ "$state" = "failed" ] && lan_hook=failed
+    fi
+    if have ip; then
+      for dev in $(printf '%s' "$lan" | tr ',' ' '); do
+        n="$(ip -4 neigh show dev "$dev" 2>/dev/null | grep -c lladdr)"
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        lan_clients=$((lan_clients + n))
+      done
+    fi
+  fi
+  echo "lan_hook=$lan_hook"
+  echo "lan_clients=$lan_clients"
   node="$(awk '
     /^[[:space:]]*proxy[[:space:]]*\{/ { inproxy = 1; next }
     inproxy && /^[[:space:]]*[A-Za-z0-9_]+[[:space:]]*\{/ { inproxy = 0 }
@@ -1584,6 +1885,8 @@ diagnose() {
   echo "resolv=$(tr '\n' ' ' < "$ROOTFS/etc/resolv.conf" 2>/dev/null | sed 's/ $//')"
   echo "dns_file=$(tr '\n' ' ' < "$DNS_SERVERS" 2>/dev/null | sed 's/ $//')"
   echo "conflicts=$(ps -A -o NAME= 2>/dev/null | grep -cE '^(sing-box|clash|mihomo|xray|v2ray|hysteria)$')"
+  echo "lan_detected=$(detect_lan_interfaces 2>/dev/null)"
+  echo "tether_offload_disabled=$(settings get global tether_offload_disabled 2>/dev/null)"
 }
 
 case "${1:-status}" in

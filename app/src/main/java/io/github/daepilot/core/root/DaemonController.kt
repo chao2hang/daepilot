@@ -72,6 +72,10 @@ class DaemonController(
                 "0" -> false
                 else -> null
             },
+            bypassUidCount = values["bypass_uid"]?.toIntOrNull(),
+            lan = values["lan"]?.takeIf { it.isNotBlank() },
+            lanClients = values["lan_clients"]?.toIntOrNull(),
+            lanHook = values["lan_hook"]?.takeIf { it.isNotBlank() },
         )
     }
 
@@ -185,6 +189,11 @@ class DaemonController(
             timeoutMs = 20_000,
         )
         result.out.ifBlank { result.err.ifBlank { "暂无日志" } }
+    }
+
+    /** Size+mtime of the daemon log; lets pollers skip the tail when it is idle. */
+    suspend fun logFingerprint(): String = withContext(Dispatchers.IO) {
+        root.runLenient("stat -c '%s %Y' ${DaePaths.LOG}", timeoutMs = 5_000).out.trim()
     }
 
     suspend fun clearLog(): ActionResult = runCtl("clearlog")

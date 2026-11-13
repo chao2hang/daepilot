@@ -35,8 +35,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -47,6 +49,17 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.daepilot.ui.theme.AmbientMode
 import io.github.daepilot.ui.theme.LocalDaeGlassPalette
+
+/** One squircle scale for every glass panel, so cards, sheets and the dock read
+ *  as the same material. Small controls keep their own tighter radius. */
+val DaeGlassRadius: Dp = 28.dp
+val DaeGlassCardShape: Shape = RoundedCornerShape(DaeGlassRadius)
+
+/** The feature panel at the top of a screen gets one step more curvature. */
+val DaeGlassHeroShape: Shape = RoundedCornerShape(34.dp)
+
+/** List rows and floating bars share a tighter step of the same scale. */
+val DaeGlassRowShape: Shape = RoundedCornerShape(20.dp)
 
 /** Large, slowly shifting light pools behind the translucent layers. The two
  *  active colours follow the daemon state so the glass feels environment-aware. */
@@ -63,8 +76,8 @@ fun AmbientBackground(
         AmbientMode.Setup -> 0.8f
         AmbientMode.Idle -> 0.45f
     }
-    val coolAlpha = (if (palette.isDark) 0.17f else 0.075f) * intensity
-    val deepAlpha = (if (palette.isDark) 0.12f else 0.055f) * intensity
+    val coolAlpha = (if (palette.isDark) 0.34f else 0.12f) * intensity
+    val deepAlpha = (if (palette.isDark) 0.26f else 0.09f) * intensity
 
     Canvas(modifier.fillMaxSize()) {
         drawRect(Brush.verticalGradient(listOf(palette.baseTop, palette.baseBottom)))
@@ -86,10 +99,19 @@ fun AmbientBackground(
             radius = size.width * 0.85f,
             center = Offset(size.width * 0.05f, size.height * 0.55f),
         )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(cool.copy(alpha = coolAlpha * 0.6f), Color.Transparent),
+                center = Offset(size.width * 0.95f, size.height * 0.92f),
+                radius = size.width * 0.75f,
+            ),
+            radius = size.width * 0.75f,
+            center = Offset(size.width * 0.95f, size.height * 0.92f),
+        )
         drawRect(
             Brush.verticalGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = if (palette.isDark) 0.035f else 0.10f),
+                    Color.White.copy(alpha = if (palette.isDark) 0.05f else 0.10f),
                     Color.Transparent,
                 ),
                 endY = size.height * 0.30f,
@@ -103,7 +125,7 @@ fun AmbientBackground(
 @Composable
 fun GlassSurface(
     modifier: Modifier = Modifier,
-    shape: Shape = RoundedCornerShape(22.dp),
+    shape: Shape = DaeGlassCardShape,
     contentPadding: PaddingValues = PaddingValues(18.dp),
     spacing: Dp = 12.dp,
     elevation: Dp = 10.dp,
@@ -129,7 +151,18 @@ fun GlassSurface(
     }
     Column(
         modifier = tinted
-            .border(0.75.dp, Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)), shape)
+            .border(1.dp, Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)), shape)
+            .drawWithContent {
+                drawContent()
+                val line = 1.dp.toPx()
+                drawRect(
+                    brush = Brush.horizontalGradient(
+                        listOf(Color.Transparent, palette.innerHighlight, Color.Transparent),
+                    ),
+                    topLeft = Offset(size.width * 0.08f, line / 2),
+                    size = Size(size.width * 0.84f, line),
+                )
+            }
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(spacing),
@@ -160,10 +193,10 @@ fun GlassIconButton(
     val palette = LocalDaeGlassPalette.current
     Box(
         modifier = modifier
-            .size(40.dp)
+            .size(44.dp)
             .clip(CircleShape)
             .background(Brush.verticalGradient(listOf(palette.glassTop, palette.glassBottom)))
-            .border(0.75.dp, Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)), CircleShape)
+            .border(1.dp, Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)), CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -184,25 +217,25 @@ fun GlassAction(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    val container = if (LocalDaeGlassPalette.current.isDark) {
-        MaterialTheme.colorScheme.surfaceContainerHigh
-    } else {
-        MaterialTheme.colorScheme.surface
-    }
+    val palette = LocalDaeGlassPalette.current
+    val shape = RoundedCornerShape(18.dp)
     Surface(
         onClick = onClick,
         enabled = enabled,
         modifier = modifier.alpha(if (enabled) 1f else 0.55f),
-        shape = RoundedCornerShape(16.dp),
-        color = container.copy(alpha = 0.90f),
+        shape = shape,
+        color = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onSurface,
         border = BorderStroke(
-            0.75.dp,
-            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f),
+            1.dp,
+            Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)),
         ),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 11.dp),
+            modifier = Modifier
+                .clip(shape)
+                .background(Brush.verticalGradient(listOf(palette.glassTop, palette.glassBottom)))
+                .padding(horizontal = 10.dp, vertical = 11.dp),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -232,7 +265,7 @@ fun GlassSearchField(
 ) {
     GlassSurface(
         modifier = modifier,
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(20.dp),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
         spacing = 0.dp,
         elevation = 8.dp,
@@ -282,13 +315,13 @@ fun DaeChip(
     modifier: Modifier = Modifier,
 ) {
     val background by animateColorAsState(
-        if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else Color.Transparent,
+        if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.20f) else Color.Transparent,
         tween(180),
         label = "chipBackground",
     )
     val borderColor by animateColorAsState(
         if (selected) {
-            MaterialTheme.colorScheme.primary.copy(alpha = 0.36f)
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
         } else {
             MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
         },
@@ -297,7 +330,7 @@ fun DaeChip(
     )
     Surface(
         onClick = onClick,
-        modifier = modifier.heightIn(min = 36.dp),
+        modifier = modifier.heightIn(min = 40.dp),
         shape = CircleShape,
         color = background,
         contentColor = if (selected) {

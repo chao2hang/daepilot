@@ -51,6 +51,10 @@ assert_file_absent() {
   if [ -e "$1" ]; then fail_test "$2 ($1 exists)"; else pass "$2"; fi
 }
 
+assert_file_present() {
+  if [ -e "$1" ]; then pass "$2"; else fail_test "$2 ($1 missing)"; fi
+}
+
 # --- fake tools -----------------------------------------------------------
 
 mkdir -p "$WORK/fakebin"
@@ -118,6 +122,16 @@ family=""
 case "$1" in
   -4|-6) family="$1"; shift ;;
 esac
+oneline=""
+case "$1" in
+  -o) oneline=1; shift ;;
+esac
+dev=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "dev" ] && dev="$a"
+  prev="$a"
+done
 case "$1" in
   rule)
     case "$2" in
@@ -166,10 +180,37 @@ case "$1" in
       *) : ;;
     esac ;;
   link)
+    # "ip link show <dev>" passes the name positionally, without a "dev" keyword.
+    [ -n "$dev" ] || dev="${3:-}"
+    if [ "$oneline" = "1" ]; then
+      printf '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN\n'
+      printf '2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n'
+      printf '3: rmnet_data3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UNKNOWN\n'
+      if [ "${FAKE_STA_DOWN:-0}" = "1" ]; then
+        printf '4: wlan0: <BROADCAST,MULTICAST> mtu 1500 state DOWN\n'
+      else
+        printf '4: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n'
+      fi
+      [ -n "${FAKE_AP:-}" ] && printf '43: %s: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n' "$FAKE_AP"
+      [ -n "${FAKE_USB:-}" ] && printf '44: %s: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UNKNOWN\n' "$FAKE_USB"
+      exit 0
+    fi
     case "$*" in
       *rmnet_data3*) echo "3: rmnet_data3: <UP,LOWER_UP> mtu 1500 state UNKNOWN mode DEFAULT" ;;
       *tun0*) echo "4: tun0: <UP,LOWER_UP> mtu 1400 state UNKNOWN mode DEFAULT" ;;
       *eth0*) echo "2: eth0: <UP,LOWER_UP> mtu 1500 state UP mode DEFAULT" ;;
+      *wlan0*)
+        if [ "${FAKE_STA_DOWN:-0}" = "1" ]; then
+          echo "4: wlan0: <BROADCAST,MULTICAST> mtu 1500 state DOWN mode DEFAULT"
+        else
+          echo "4: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP mode DEFAULT"
+        fi ;;
+      *)
+        if [ -n "$dev" ] && [ "$dev" = "${FAKE_AP:-}" ]; then
+          echo "43: $dev: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP mode DEFAULT"
+        elif [ -n "$dev" ] && [ "$dev" = "${FAKE_USB:-}" ]; then
+          echo "44: $dev: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UNKNOWN mode DEFAULT"
+        fi ;;
     esac ;;
   addr)
     if [ "$family" = "-4" ]; then
@@ -177,8 +218,23 @@ case "$1" in
         *rmnet_data3*) echo "    inet 10.0.0.2/30 scope global rmnet_data3" ;;
         *tun0*) echo "    inet 10.8.0.2/24 scope global tun0" ;;
         *eth0*) echo "    inet 192.0.2.2/24 scope global eth0" ;;
+        *wlan0*) [ "${FAKE_STA_DOWN:-0}" = "1" ] || echo "    inet 192.0.2.2/24 scope global wlan0" ;;
+        *)
+          if [ -n "$dev" ] && [ "$dev" = "${FAKE_AP:-}" ]; then
+            echo "    inet 192.168.43.1/24 scope global $dev"
+          elif [ -n "$dev" ] && [ "$dev" = "${FAKE_USB:-}" ]; then
+            echo "    inet 192.168.42.129/24 scope global $dev"
+          fi ;;
       esac
     fi ;;
+  neigh)
+    n="${FAKE_LAN_CLIENTS:-0}"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      i=$((i + 1))
+      printf '192.168.43.%s lladdr aa:bb:cc:dd:ee:0%s REACHABLE\n' "$((100 + i))" "$i"
+    done ;;
 esac
 exit 0
 EOF
@@ -238,9 +294,62 @@ if [ "\${FAKE_CURL_FAIL:-0}" = "1" ]; then exit 28; fi
 exit 0
 EOF
 
+cat > "$WORK/fakebin/iw" <<'EOF'
+#!/bin/sh
+# iw dev: a station plus an optional AP. HyperOS names the AP wlan2, so the
+# ctl must read the type rather than guess from the interface name.
+printf 'phy#0\n'
+printf '\tInterface wlan0\n\t\tifindex 4\n\t\ttype managed\n'
+if [ -n "${FAKE_AP:-}" ]; then
+  printf '\tInterface %s\n\t\tifindex 43\n\t\ttype AP\n' "$FAKE_AP"
+fi
+exit 0
+EOF
+
+cat > "$WORK/fakebin/tc" <<EOF
+#!/bin/sh
+# Stateful clsact filter table: "filter show" reads \$FAKE_TC_STATE/<dev>.<hook>,
+# "filter del ... pref N" drops that pref. Every call is logged.
+printf 'tc %s\n' "\$*" >> "$WORK/tc.log"
+state="\${FAKE_TC_STATE:?}"
+[ "\$1" = "filter" ] || exit 0
+action="\$2"
+dev=""; hook=""; pref=""
+shift 2
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    dev) dev="\$2"; shift 2 ;;
+    ingress|egress) hook="\$1"; shift ;;
+    pref) pref="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "\$dev" ] && [ -n "\$hook" ] || exit 0
+case "\$action" in
+  show)
+    [ -f "\$state/\$dev.\$hook" ] || exit 0
+    while read -r p name; do
+      [ -n "\$p" ] || continue
+      printf 'filter protocol ip pref %s bpf chain 0 handle 0x1 %s direct-action not_in_hw\n' "\$p" "\$name"
+    done < "\$state/\$dev.\$hook" ;;
+  del)
+    [ -f "\$state/\$dev.\$hook" ] || exit 0
+    grep -v "^\$pref " "\$state/\$dev.\$hook" > "\$state/\$dev.\$hook.tmp" 2>/dev/null
+    mv "\$state/\$dev.\$hook.tmp" "\$state/\$dev.\$hook" ;;
+esac
+exit 0
+EOF
+
+cat > "$WORK/fakebin/settings" <<'EOF'
+#!/bin/sh
+# diagnose asks for the tethering offload global; null = Android default.
+echo "null"
+EOF
+
 chmod 755 "$WORK/fakebin/chroot" "$WORK/fakebin/busybox" "$WORK/fakebin/getprop" \
   "$WORK/fakebin/ip" "$WORK/fakebin/mount" "$WORK/fakebin/mountpoint" "$WORK/fakebin/ping" \
-  "$WORK/fakebin/dumpsys" "$WORK/fakebin/iptables" "$WORK/fakebin/curl"
+  "$WORK/fakebin/dumpsys" "$WORK/fakebin/iptables" "$WORK/fakebin/curl" \
+  "$WORK/fakebin/iw" "$WORK/fakebin/tc" "$WORK/fakebin/settings"
 
 # --- per-test fixtures ----------------------------------------------------
 
@@ -283,6 +392,16 @@ case "$1" in
     fi
     exit 0 ;;
   run)
+    # LAN bind failures: fatal (rejected TCX attach) or warn-only (kernel gate).
+    if grep -q 'lan_interface' "${DAEPILOT_TEST_ROOT:?}/config/config.dae" 2>/dev/null; then
+      if [ "${DAEPILOT_TEST_FAIL_LAN:-0}" = "1" ]; then
+        echo 'FATAL commit TC HookSet transaction: attach TC hook dae_lan_ingress_l2 on wlan2: invalid argument'
+        exit 1
+      fi
+      if [ "${DAEPILOT_TEST_WARN_LAN:-0}" = "1" ]; then
+        echo ' WARN your kernel version 5.10 does not support bind to LAN; expect >=5.15; remove lan_interface in config file and try again'
+      fi
+    fi
     echo "$$" > "${DAEPILOT_TEST_ROOT:?}/run/dae.pid" 2>/dev/null
     # Keep "run -c /config/config.dae" in the process cmdline; is_our_dae()
     # deliberately checks it so a stale or unrelated dae is not adopted.
@@ -304,6 +423,9 @@ EOF
   install_ctl "$1"
   : > "$WORK/validated.log"
   : > "$WORK/stderr.txt"
+  mkdir -p "$WORK/tcstate"
+  rm -f "$WORK/tcstate/"* 2>/dev/null
+  : > "$WORK/tc.log"
 }
 
 launch_daemon() {
@@ -334,6 +456,13 @@ run_ctl() { # $@ = ctl args; stdout is the ctl stdout, stderr -> $WORK/stderr.tx
     export FAKE_IPV6="${FAKE_IPV6:-}"
     export FAKE_DUMPSYS="${FAKE_DUMPSYS:-}"
     export FAKE_CURL_FAIL="${FAKE_CURL_FAIL:-}"
+    export FAKE_AP="${FAKE_AP:-}"
+    export FAKE_USB="${FAKE_USB:-}"
+    export FAKE_LAN_CLIENTS="${FAKE_LAN_CLIENTS:-}"
+    export FAKE_STA_DOWN="${FAKE_STA_DOWN:-}"
+    export FAKE_TC_STATE="$WORK/tcstate"
+    export DAEPILOT_TEST_FAIL_LAN="${FAIL_LAN:-}"
+    export DAEPILOT_TEST_WARN_LAN="${WARN_LAN:-}"
     sh "$CTL_UNDER_TEST" "$@" 2>"$WORK/stderr.txt"
   )
 }
@@ -352,9 +481,16 @@ out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
 assert_eq "$rc" "0" "apply succeeds"
 assert_contains "$CONF" "log_level" "config.dae contains staged config"
 assert_not_contains "$CONF" "GEOIP-BINARY-MARKER" "config.dae is not geoip data"
-assert_eq "$(tail -n 1 "$WORK/validated.log")" "$BASE/rootfs/config/config.validate.dae" \
-  "dae validated the .dae-suffixed guest file"
-assert_file_absent "$BASE/rootfs/config/config.validate.dae" "validate temp file removed"
+validated_file="$(tail -n 1 "$WORK/validated.log")"
+case "$validated_file" in
+  "$BASE/rootfs/config/config.validate."*.dae) pass "dae validated the .dae-suffixed guest file" ;;
+  *) fail_test "dae validated the .dae-suffixed guest file (got [$validated_file])" ;;
+esac
+leftover=""
+for f in "$BASE"/rootfs/config/config.validate.*; do
+  [ -e "$f" ] && leftover="$leftover $f"
+done
+assert_eq "$leftover" "" "validate temp file removed"
 assert_contains "$BASE/rootfs/etc/resolv.conf" "119.29.29.29" "DNS fallback 119.29.29.29 present"
 assert_contains "$BASE/rootfs/etc/resolv.conf" "223.5.5.5" "DNS fallback 223.5.5.5 present"
 assert_not_contains "$BASE/rootfs/etc/resolv.conf" "1.1.1.1" "no unreachable 1.1.1.1 fallback"
@@ -903,6 +1039,180 @@ case "$out" in
   *) pass "warmup: failed probe is not reported as warmed" ;;
 esac
 run_ctl stop >/dev/null 2>&1
+
+# ==========================================================================
+# 19. Hotspot / USB tethering sharing. Tethered clients are FORWARD-path
+#     traffic that dae's socket and WAN hooks never see, so only lan_interface
+#     captures them: resolve the downstream interfaces, keep Android's
+#     tethering offload filters from blocking the TCX attach, and degrade to
+#     phone-only proxying when the LAN hook cannot be attached.
+LAN_CONF='global {
+  wan_interface: auto
+  lan_interface: auto
+}
+routing {
+  fallback: proxy
+}'
+
+lan_value() {
+  sed -n 's/^[[:space:]]*lan_interface:[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+    "$BASE/rootfs/config/config.dae" 2>/dev/null | head -n 1
+}
+
+# 19a. The AP is found by its iw type, not by name (HyperOS: wlan2 AP, wlan0
+#      station), and the station must not be picked up with it.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_AP=wlan2
+FAKE_LAN_CLIENTS=2
+printf '%s\n' "$LAN_CONF" > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "lan: apply with auto LAN succeeds"
+out="$(run_ctl start)"; rc=$?
+assert_eq "$rc" "0" "lan: start with an AP succeeds"
+assert_contains "$CONF" "lan_interface: auto" "lan: source config keeps the app intent"
+assert_eq "$(lan_value)" "wlan2" "lan: only the AP interface is bound"
+assert_eq "$(head -n 1 "$BASE/run/lan.interfaces")" "wlan2" "lan: binding recorded"
+assert_file_present "$BASE/run/lan.auto" "lan: auto intent recorded"
+run_ctl status > "$WORK/status.out"
+assert_contains "$WORK/status.out" "lan=wlan2" "lan: status reports the bound interface"
+assert_contains "$WORK/status.out" "lan_hook=ok" "lan: status reports the hook as attached"
+assert_contains "$WORK/status.out" "lan_clients=2" "lan: status counts tethered clients"
+run_ctl diagnose > "$WORK/diag.out"
+assert_contains "$WORK/diag.out" "lan_detected=wlan2" "lan: diagnose reports the detected AP"
+run_ctl stop >/dev/null 2>&1
+FAKE_LAN_CLIENTS=""
+
+# 19b. Nothing shared -> the line is dropped so dae never binds a stale name.
+FAKE_AP=""
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "lan: apply without sharing succeeds"
+out="$(run_ctl start)"; rc=$?
+assert_eq "$rc" "0" "lan: start without sharing succeeds"
+assert_eq "$(lan_value)" "" "lan: no downstream interface -> line dropped"
+assert_file_absent "$BASE/run/lan.interfaces" "lan: binding cleared"
+run_ctl status > "$WORK/status.out"
+assert_contains "$WORK/status.out" "lan_hook=absent" "lan: status reports no LAN hook"
+assert_contains "$WORK/status.out" "lan_clients=0" "lan: no clients without sharing"
+run_ctl stop >/dev/null 2>&1
+
+# 19c. Wi-Fi and USB tethering at once bind both, comma-separated without
+#      spaces (dae splits the value on ",").
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_AP=wlan2
+FAKE_USB=usb0
+printf '%s\n' "$LAN_CONF" > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "lan: apply with AP and USB succeeds"
+assert_eq "$(lan_value)" "wlan2,usb0" "lan: both downstream interfaces are bound"
+FAKE_USB=""
+FAKE_AP=""
+
+# 19d. Without iw the fallback is a live Wi-Fi interface that is not the WAN;
+#      a disconnected station must not be mistaken for a hotspot.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+mv "$WORK/fakebin/iw" "$WORK/iw.hidden"
+FAKE_AP=wlan2
+FAKE_STA_DOWN=1
+FAKE_MOBILE=1
+printf '%s\n' "$LAN_CONF" > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
+assert_eq "$rc" "0" "lan: apply without iw succeeds"
+assert_eq "$(lan_value)" "wlan2" "lan: AP detected without iw, station skipped"
+mv "$WORK/iw.hidden" "$WORK/fakebin/iw"
+FAKE_STA_DOWN=""
+FAKE_MOBILE=""
+FAKE_AP=""
+
+# 19e. Android's tethering offload filters make the TCX attach fail with
+#      EINVAL. They must be gone before launch; unrelated filters must stay.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_AP=wlan2
+printf '3 prog_offload_schedcls_tether_upstream4_ether\n2 prog_offload_schedcls_tether_upstream6_ether\n5 some_other_prog\n' \
+  > "$WORK/tcstate/wlan2.ingress"
+printf '%s\n' "$LAN_CONF" > "$BASE/staging/config.dae"
+run_ctl apply "$BASE/staging/config.dae" >/dev/null 2>&1
+out="$(run_ctl start)"; rc=$?
+assert_eq "$rc" "0" "lan: start with offload filters present succeeds"
+assert_contains "$WORK/tc.log" "filter del dev wlan2 ingress pref 3" \
+  "lan: IPv4 tethering offload filter removed"
+assert_contains "$WORK/tc.log" "filter del dev wlan2 ingress pref 2" \
+  "lan: IPv6 tethering offload filter removed"
+assert_not_contains "$WORK/tc.log" "pref 5" "lan: unrelated filters are left alone"
+assert_contains "$WORK/tcstate/wlan2.ingress" "some_other_prog" \
+  "lan: unrelated filter still installed"
+run_ctl stop >/dev/null 2>&1
+FAKE_AP=""
+
+# 19f. A rejected LAN attach must not take the whole proxy down: retry once
+#      with the filters cleared, then start without LAN and report it.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_AP=wlan2
+FAIL_LAN=1
+printf '%s\n' "$LAN_CONF" > "$BASE/staging/config.dae"
+run_ctl apply "$BASE/staging/config.dae" >/dev/null 2>&1
+out="$(run_ctl start)"; rc=$?
+assert_eq "$rc" "0" "lan: fatal LAN attach still starts the proxy"
+case "$out" in
+  *降级*) pass "lan: degrade is reported to the caller" ;;
+  *) fail_test "lan: degrade is reported to the caller (got [$out])" ;;
+esac
+assert_eq "$(lan_value)" "" "lan: degraded config drops the LAN bind"
+assert_contains "$CONF" "lan_interface: auto" "lan: app intent kept for the next retry"
+assert_eq "$(head -n 1 "$BASE/run/lan.hook")" "failed" "lan: hook state records the failure"
+run_ctl status > "$WORK/status.out"
+assert_contains "$WORK/status.out" "running=1" "lan: daemon is up after degrading"
+assert_contains "$WORK/status.out" "lan_hook=failed" "lan: status reports the degraded hook"
+FAIL_LAN=""
+run_ctl stop >/dev/null 2>&1
+FAKE_AP=""
+
+# 19g. The kernel-version gate only warns: dae stays up without LAN capture,
+#      so the log must be checked, not just the process state.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+FAKE_AP=wlan2
+WARN_LAN=1
+printf '%s\n' "$LAN_CONF" > "$BASE/staging/config.dae"
+run_ctl apply "$BASE/staging/config.dae" >/dev/null 2>&1
+out="$(run_ctl start)"; rc=$?
+assert_eq "$rc" "0" "lan: warn-only LAN failure still starts the proxy"
+assert_eq "$(lan_value)" "" "lan: warn-only failure also drops the LAN bind"
+assert_eq "$(head -n 1 "$BASE/run/lan.hook")" "failed" "lan: warn-only failure is recorded"
+run_ctl status > "$WORK/status.out"
+assert_contains "$WORK/status.out" "running=1" "lan: daemon is up after a warn-only failure"
+WARN_LAN=""
+run_ctl stop >/dev/null 2>&1
+FAKE_AP=""
+
+# 19h. Toggling sharing while dae runs goes through hot reload: the offload
+#      filters must be cleared there too, and the binding recorded.
+setup_base "$CTL_SRC"
+CTL_UNDER_TEST="$BASE/bin/daepilotctl"
+printf 'global {\n  wan_interface: auto\n}\n' > "$BASE/staging/config.dae"
+run_ctl apply "$BASE/staging/config.dae" >/dev/null 2>&1
+run_ctl start >/dev/null 2>&1
+FAKE_AP=wlan2
+printf '3 prog_offload_schedcls_tether_upstream4_ether\n' > "$WORK/tcstate/wlan2.ingress"
+printf '%s\n' "$LAN_CONF" > "$BASE/staging/config.dae"
+out="$(run_ctl apply "$BASE/staging/config.dae" --reload)"; rc=$?
+assert_eq "$rc" "0" "lan: hot reload with sharing succeeds"
+assert_contains "$WORK/tc.log" "filter del dev wlan2 ingress pref 3" \
+  "lan: hot reload clears the offload filter"
+assert_eq "$(head -n 1 "$BASE/run/lan.interfaces")" "wlan2" "lan: hot reload records the binding"
+assert_eq "$(head -n 1 "$BASE/run/lan.hook")" "ok" "lan: hot reload reports the hook attached"
+run_ctl stop >/dev/null 2>&1
+FAKE_AP=""
+
+# 19i. The watchdog must follow hotspot changes (dae binds LAN only at startup)
+#      and keep clearing the filters netd re-installs.
+assert_contains "$CTL_SRC" "LAN changed (" "lan: watchdog restarts on a hotspot change"
+assert_contains "$CTL_SRC" 'LAN_CANDIDATE_COUNT' "lan: watchdog debounces the LAN change"
+assert_contains "$CTL_SRC" "prepare_lan_hooks" "lan: offload filters are re-cleared periodically"
 
 # ==========================================================================
 if [ "$FAILED" -eq 0 ]; then

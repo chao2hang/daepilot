@@ -522,6 +522,7 @@ class DaeRepository(
             tproxyPort = snapshot.settings.tproxyPort,
             logLevel = snapshot.settings.logLevel,
             bypassPackages = snapshot.settings.bypassPackages,
+            lanInterface = if (snapshot.settings.tetherShare) "auto" else null,
         )
     }
 

@@ -321,9 +321,21 @@ fun KeyValueRow(
     }
 }
 
-/**
- * Always-visible outbound strip: exit IP when connected, the live switch phase
- * while a selection is being applied, and the failure reason otherwise.
+/** One latency scale for the whole app, so a node row, a pill and the hero card
+ *  cannot disagree about what "slow" looks like. */
+@Composable
+fun latencyTone(millis: Int?): Color {
+    val palette = LocalDaeGlassPalette.current
+    return when {
+        millis == null -> MaterialTheme.colorScheme.error
+        millis < 100 -> palette.success
+        millis < 250 -> palette.warning
+        else -> MaterialTheme.colorScheme.error
+    }
+}
+
+/** Always-visible outbound strip: exit IP when connected, the live switch phase
+ *  while a selection is being applied, and the failure reason otherwise.
  */
 @Composable
 fun ConnectionBanner(
@@ -331,6 +343,8 @@ fun ConnectionBanner(
     running: Boolean,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    embedded: Boolean = false,
 ) {
     if (!running) return
     val palette = LocalDaeGlassPalette.current
@@ -372,10 +386,14 @@ fun ConnectionBanner(
                 .joinToString(" · ")
         ConnectionPhase.STOPPED -> "点击刷新读取当前出口"
     }
-    val shape = RoundedCornerShape(14.dp)
-
-    Row(
-        modifier = modifier
+    val shape = RoundedCornerShape(16.dp)
+    // Off the home tab only a switch in flight or a failure is worth showing, and
+    // then as a floating pill; inside the hero card the strip drops its own panel.
+    val detail = embedded || !compact || state.phase != ConnectionPhase.CONNECTED
+    val panel = if (embedded) {
+        modifier.fillMaxWidth()
+    } else {
+        modifier
             .fillMaxWidth()
             .clip(shape)
             .background(
@@ -386,13 +404,22 @@ fun ConnectionBanner(
                     ),
                 ),
             )
-            .border(0.75.dp, tone.copy(alpha = 0.30f), shape)
-            .padding(start = 14.dp, end = 8.dp, top = 9.dp, bottom = 9.dp),
+            .border(1.dp, tone.copy(alpha = 0.30f), shape)
+    }
+
+    Row(
+        modifier = panel
+            .padding(
+                start = if (embedded) 0.dp else 14.dp,
+                end = 6.dp,
+                top = if (detail) 9.dp else 6.dp,
+                bottom = if (detail) 9.dp else 6.dp,
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
-                .size(7.dp)
+                .size(6.dp)
                 .clip(CircleShape)
                 .background(tone),
         )
@@ -421,7 +448,7 @@ fun ConnectionBanner(
                     )
                 }
             }
-            if (line.isNotBlank()) {
+            if (detail && line.isNotBlank()) {
                 Text(
                     line,
                     style = MaterialTheme.typography.labelSmall,
@@ -436,14 +463,14 @@ fun ConnectionBanner(
             CircularProgressIndicator(
                 modifier = Modifier
                     .padding(horizontal = 8.dp)
-                    .size(13.dp),
+                    .size(14.dp),
                 strokeWidth = 1.8.dp,
                 color = tone,
             )
         } else {
             Box(
                 modifier = Modifier
-                    .size(30.dp)
+                    .size(40.dp)
                     .clip(CircleShape)
                     .clickable(onClick = onRefresh),
                 contentAlignment = Alignment.Center,

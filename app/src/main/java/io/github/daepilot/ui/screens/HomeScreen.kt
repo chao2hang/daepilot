@@ -35,12 +35,15 @@ import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -65,8 +68,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.daepilot.BuildConfig
+import io.github.daepilot.core.log.LogAlerts
 import io.github.daepilot.core.model.AppSnapshot
 import io.github.daepilot.core.model.CompatibilityReport
+import io.github.daepilot.core.model.ConnectionState
 import io.github.daepilot.core.model.DaemonStatus
 import io.github.daepilot.core.model.Node
 import io.github.daepilot.core.model.OutboundGroup
@@ -77,7 +82,10 @@ import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.BandwidthState
 import io.github.daepilot.ui.Format
 import io.github.daepilot.ui.SiteProbeState
+import io.github.daepilot.ui.components.ConnectionBanner
 import io.github.daepilot.ui.components.DiagnosticsDialog
+import io.github.daepilot.ui.components.DaeGlassCardShape
+import io.github.daepilot.ui.components.DaeGlassHeroShape
 import io.github.daepilot.ui.components.GlassAction
 import io.github.daepilot.ui.components.GlassIconButton
 import io.github.daepilot.ui.components.GlassSurface
@@ -101,6 +109,8 @@ fun HomeScreen(
     val rootState by viewModel.rootState.collectAsStateWithLifecycle()
     val probes by viewModel.siteProbes.collectAsStateWithLifecycle()
     val bandwidth by viewModel.bandwidth.collectAsStateWithLifecycle()
+    val alerts by viewModel.logAlerts.collectAsStateWithLifecycle()
+    val connection by viewModel.connection.collectAsStateWithLifecycle()
     LaunchedEffect(status.running) {
         if (status.running) viewModel.refreshSiteProbes()
     }
@@ -133,7 +143,7 @@ fun HomeScreen(
             top = 6.dp,
             bottom = ScreenBottom,
         ),
-        verticalArrangement = Arrangement.spacedBy(13.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item {
             HomeHeader(
@@ -155,6 +165,27 @@ fun HomeScreen(
                 onSetup = onSetup,
                 onToggle = { viewModel.toggleProxy(!status.running) },
                 onOpenNodes = onOpenNodes,
+                connection = connection,
+                onRefreshExit = viewModel::refreshExit,
+            )
+        }
+        item {
+            // Anomalies outrank telemetry, and the action row sits above them: the
+            // floating dock already owns the bottom of the screen, so anything
+            // actionable has to be reachable without scrolling for it.
+            if (alerts.total > 0) {
+                AlertsCard(alerts = alerts, onOpenLogs = onOpenLogs)
+            }
+        }
+        item {
+            QuickActions(
+                canTest = snapshot.nodes.isNotEmpty() && !busy,
+                onTest = viewModel::testAllNodes,
+                onLogs = onOpenLogs,
+                onDiagnose = {
+                    showDiagnostics = true
+                    viewModel.diagnose()
+                },
             )
         }
         item { ResourceCard(status) }
@@ -174,17 +205,6 @@ fun HomeScreen(
         }
         item {
             SignalCard(status = status, bootRequested = snapshot.settings.bootStart)
-        }
-        item {
-            QuickActions(
-                canTest = snapshot.nodes.isNotEmpty() && !busy,
-                onTest = viewModel::testAllNodes,
-                onLogs = onOpenLogs,
-                onDiagnose = {
-                    showDiagnostics = true
-                    viewModel.diagnose()
-                },
-            )
         }
     }
 
@@ -251,6 +271,8 @@ private fun HeroCard(
     onSetup: (() -> Unit)?,
     onToggle: () -> Unit,
     onOpenNodes: () -> Unit,
+    connection: ConnectionState,
+    onRefreshExit: () -> Unit,
 ) {
     val running = status.running
     // After a reboot the status read has to re-establish the su session first;
@@ -290,7 +312,7 @@ private fun HeroCard(
     }
 
     GlassSurface(
-        shape = RoundedCornerShape(30.dp),
+        shape = DaeGlassHeroShape,
         contentPadding = PaddingValues(20.dp),
         spacing = 16.dp,
         onClick = onOpenNodes,
@@ -313,6 +335,16 @@ private fun HeroCard(
                 if (running) "TProxy" else "本机",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // The card navigates; the whole panel is clickable, so the cue goes on
+            // the eyebrow row rather than on a second, nested button.
+            Icon(
+                Icons.Outlined.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                modifier = Modifier
+                    .padding(start = 2.dp)
+                    .size(15.dp),
             )
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -337,19 +369,6 @@ private fun HeroCard(
                         loading = setupLoading,
                         onClick = onSetup,
                     )
-                } else if (running && selectedNode?.latencyMs != null) {
-                    Spacer(Modifier.height(11.dp))
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                        contentColor = MaterialTheme.colorScheme.primary,
-                    ) {
-                        Text(
-                            "${selectedNode.latencyMs} ms",
-                            style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        )
-                    }
                 }
             }
             Spacer(Modifier.width(14.dp))
@@ -359,6 +378,22 @@ private fun HeroCard(
                 busy = busy,
                 onToggle = onToggle,
             )
+        }
+        if (running) {
+            // The exit used to be a strip pinned above the header, which read as a
+            // second title bar. It belongs with the state it describes.
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                HorizontalDivider(
+                    thickness = 0.75.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.70f),
+                )
+                ConnectionBanner(
+                    state = connection,
+                    running = true,
+                    onRefresh = onRefreshExit,
+                    embedded = true,
+                )
+            }
         }
     }
 }
@@ -427,7 +462,7 @@ private fun PowerOrb(
         animationSpec = spring(dampingRatio = 0.62f, stiffness = 780f),
         label = "powerScale",
     )
-    val glowAlpha = if (running) 0.24f + 0.16f * breath else 0f
+    val glowAlpha = if (running) 0.55f + 0.35f * breath else 0f
     val outerSize = if (compact) 68.dp else 88.dp
     val innerSize = if (compact) 54.dp else 64.dp
     val iconSize = if (compact) 22.dp else 26.dp
@@ -452,7 +487,8 @@ private fun PowerOrb(
         MaterialTheme.colorScheme.onSurface
     }
     val edgeColor = if (running) {
-        Color.Transparent
+        // A lit orb still needs the specular rim, or it reads as flat plastic.
+        Color.White.copy(alpha = if (palette.isDark) 0.42f else 0.65f)
     } else {
         MaterialTheme.colorScheme.outline.copy(alpha = 0.40f)
     }
@@ -495,6 +531,19 @@ private fun PowerOrb(
                 ),
             contentAlignment = Alignment.Center,
         ) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.White.copy(alpha = if (running) 0.30f else 0.16f),
+                                Color.Transparent,
+                            ),
+                        ),
+                        CircleShape,
+                    ),
+            )
             if (pressed) {
                 Box(
                     modifier = Modifier
@@ -558,7 +607,6 @@ private fun ResourceCard(status: DaemonStatus) {
 
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
         contentPadding = PaddingValues(12.dp),
         spacing = 0.dp,
     ) {
@@ -608,10 +656,12 @@ private fun ResourceStat(
     tone: Color,
     modifier: Modifier = Modifier,
 ) {
+    val palette = LocalDaeGlassPalette.current
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .background(Brush.verticalGradient(listOf(palette.glassTop, palette.glassBottom)))
+            .border(1.dp, palette.borderBottom, RoundedCornerShape(16.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Text(
@@ -650,7 +700,6 @@ private fun SiteCard(
 ) {
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 15.dp),
         spacing = 9.dp,
     ) {
@@ -700,6 +749,94 @@ private fun SiteCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+@Composable
+private fun AlertsCard(alerts: LogAlerts, onOpenLogs: () -> Unit) {
+    val palette = LocalDaeGlassPalette.current
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(16.dp),
+        spacing = 10.dp,
+        onClick = onOpenLogs,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Outlined.WarningAmber,
+                contentDescription = null,
+                tint = palette.warning,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("运行告警", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "本次运行 · 点按查看日志",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Outlined.Article,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        if (alerts.dnsUpstreamFailures > 0) {
+            val hosts = alerts.failingUpstreams
+                .map { it.substringAfter("://").substringBefore("/").substringBefore(":") }
+                .distinct()
+                .joinToString("、")
+            AlertRow(
+                label = "DNS 上游失败",
+                count = alerts.dnsUpstreamFailures,
+                detail = hosts.ifBlank { null },
+                tone = palette.warning,
+            )
+        }
+        if (alerts.udpQueueDrops > 0) {
+            AlertRow(
+                label = "UDP 队列丢包",
+                count = alerts.udpQueueDrops,
+                detail = "节点转发队列饱和",
+                tone = palette.warning,
+            )
+        }
+        if (alerts.datapathAnomalies > 0) {
+            AlertRow(
+                label = "数据面异常",
+                count = alerts.datapathAnomalies,
+                detail = "连接路由元数据冲突",
+                tone = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AlertRow(label: String, count: Int, detail: String?, tone: Color) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            if (!detail.isNullOrBlank()) {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Text("$count 次", style = MaterialTheme.typography.titleSmall, color = tone)
     }
 }
 
@@ -821,7 +958,6 @@ private fun BandwidthCard(
     val error = result?.error
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
         contentPadding = PaddingValues(16.dp),
         spacing = 11.dp,
     ) {
@@ -991,7 +1127,6 @@ private fun SignalCard(status: DaemonStatus, bootRequested: Boolean) {
         else -> "关闭"
     }
     GlassSurface(
-        shape = RoundedCornerShape(22.dp),
         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 13.dp),
         spacing = 0.dp,
     ) {

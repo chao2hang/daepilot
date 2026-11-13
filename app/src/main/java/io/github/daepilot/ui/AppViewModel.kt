@@ -13,6 +13,8 @@ import io.github.daepilot.DaePilotApp
 import io.github.daepilot.core.config.ConfigRedactor
 import io.github.daepilot.core.config.DaeConfigRenderer
 import io.github.daepilot.core.config.SpeedTestPlan
+import io.github.daepilot.core.log.LogAlertParser
+import io.github.daepilot.core.log.LogAlerts
 import io.github.daepilot.core.model.AppSettings
 import io.github.daepilot.core.model.AppSnapshot
 import io.github.daepilot.core.network.DomainTargets
@@ -66,6 +68,9 @@ import java.util.Locale
 import java.util.UUID
 
 data class LogLine(val raw: String, val level: String)
+
+/** A transient toast; [actionLabel] asks the UI to offer one follow-up action. */
+data class UiMessage(val text: String, val actionLabel: String? = null)
 
 data class RootUiState(
     val requesting: Boolean = false,
@@ -126,6 +131,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _logs = MutableStateFlow<List<LogLine>>(emptyList())
     val logs: StateFlow<List<LogLine>> = _logs.asStateFlow()
 
+    private val _logAlerts = MutableStateFlow(LogAlerts())
+    val logAlerts: StateFlow<LogAlerts> = _logAlerts.asStateFlow()
+
     private val _logUpload = MutableStateFlow(LogUploadState())
     val logUpload: StateFlow<LogUploadState> = _logUpload.asStateFlow()
 
@@ -155,11 +163,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val bandwidth: StateFlow<BandwidthState> = _bandwidth.asStateFlow()
     private var bandwidthJob: Job? = null
 
-    private val messageChannel = Channel<String>(Channel.BUFFERED)
+    private val messageChannel = Channel<UiMessage>(Channel.BUFFERED)
     val messages = messageChannel.receiveAsFlow()
 
     private var logJob: Job? = null
     private var statusJob: Job? = null
+    private var alertsFingerprint: String? = null
     private var bypassUidsSynced = false
     private val recentEvents = ArrayDeque<String>()
     private val eventTime = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -196,8 +205,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         refreshConnection(announce = false)
                     } else {
                         onProxyStopped()
+                        _logAlerts.value = LogAlerts()
                     }
                 }
+                if (running) refreshLogAlerts()
                 // Real traffic through the node is the only honest proxy check,
                 // so re-probe the home sites every couple of minutes.
                 if (tick > 0 && running) {
@@ -345,7 +356,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } else {
                 val stopped = daemon.stop()
-                notify(if (stopped.ok) "dae 已停止" else "停止失败：${stopped.message}")
+                notify(
+                    if (stopped.ok) "dae 已停止" else "停止失败：${stopped.message}",
+                    actionLabel = "重新启动".takeIf { stopped.ok },
+                )
             }
         }
         container.ensureRootSession()
@@ -1011,6 +1025,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         applyIfRunning()
     }
 
+    fun setTetherShare(enabled: Boolean) = viewModelScope.launch {
+        repo.updateSettings { it.copy(tetherShare = enabled) }
+        notify(
+            if (enabled) "热点共享已开启，开启热点后约 30 秒内生效"
+            else "热点共享已关闭",
+        )
+        applyIfRunning()
+        refreshStatus()
+    }
+
     fun setTproxyPort(port: Int) = viewModelScope.launch {
         if (port !in 1..65535) {
             notify("端口必须在 1-65535 之间")
@@ -1049,9 +1073,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun startLogStream() {
         if (logJob?.isActive == true) return
         logJob = viewModelScope.launch {
+            var fingerprint: String? = null
             while (isActive) {
-                val raw = runCatching { daemon.readLog(800) }.getOrDefault("")
-                _logs.value = parseLogs(raw)
+                val tail = readLogIfChanged(800, fingerprint)
+                if (tail != null) {
+                    fingerprint = tail.second
+                    _logs.value = parseLogs(tail.first)
+                    publishLogAlerts(tail.first)
+                }
                 delay(2_500)
             }
         }
@@ -1069,6 +1098,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun exportLogs(): String = _logs.value.joinToString("\n") { it.raw }
+
+    private suspend fun refreshLogAlerts() {
+        // The log stream already publishes alerts from the same tail; a second
+        // read here would double the root-shell traffic while the page is open.
+        if (logJob?.isActive == true) return
+        val tail = readLogIfChanged(800, alertsFingerprint) ?: return
+        alertsFingerprint = tail.second
+        publishLogAlerts(tail.first)
+    }
+
+    /**
+     * The tail is ~200KB over the su pipe; on an idle daemon it is identical
+     * every poll. stat is a few bytes, so skip the read until the log moves.
+     * Each consumer keeps its own fingerprint: a shared one would let the first
+     * reader starve the other, which then never populates its initial state.
+     */
+    private suspend fun readLogIfChanged(lines: Int, fingerprint: String?): Pair<String, String>? {
+        val current = runCatching { daemon.logFingerprint() }.getOrDefault("")
+        if (current.isNotEmpty() && current == fingerprint) return null
+        val raw = runCatching { daemon.readLog(lines) }.getOrDefault("")
+        return raw to current
+    }
+
+    private fun publishLogAlerts(raw: String) {
+        _logAlerts.value = LogAlertParser.parse(
+            raw.lineSequence().filter { it.isNotBlank() }.toList(),
+        )
+    }
 
     fun uploadLogs() = viewModelScope.launch {
         if (_logUpload.value.uploading) return@launch
@@ -1149,9 +1206,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _logUpload.value = LogUploadState()
     }
 
-    private fun notify(message: String) {
+    /** Toast for work the UI performs itself — clipboard writes, file exports —
+     *  which still needs the same acknowledgement every daemon action gets. */
+    fun toast(message: String) = notify(message)
+
+    private fun notify(message: String, actionLabel: String? = null) {
         recordEvent(message)
-        messageChannel.trySend(message)
+        messageChannel.trySend(UiMessage(message, actionLabel))
     }
 
     private fun recordEvent(message: String) {
@@ -1180,9 +1241,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     "warning", "warn" -> "warn"
                     "trace", "debug", "info", "error", "fatal" -> levelText
                     else -> when {
-                        line.contains("ERROR", true) || line.contains("failed", true) -> "error"
+                        // The level tag wins over the message text: dae logs a warning as
+                        // "WARN DNS forward to upstream failed", which is not an error line.
+                        line.contains("ERROR", true) || line.contains("FATAL", true) -> "error"
                         line.contains("WARN", true) -> "warn"
                         line.contains("DEBUG", true) -> "debug"
+                        line.contains("failed", true) -> "error"
                         else -> "info"
                     }
                 }

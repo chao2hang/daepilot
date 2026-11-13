@@ -167,9 +167,19 @@ private fun darkAccentScheme(h: Float): ColorScheme {
     )
 }
 
-/** Neutral ink surfaces plus the accent as a faint light pool. The card layers
- *  are opaque enough to read as frosted panels; real blur is reserved for the
- *  floating dock, where it actually buys something. */
+/** The ambient mesh needs a second, cooler hue next to the accent; two pools of
+ *  the same colour read as a flat vignette instead of light bending through glass. */
+private fun ambientCounter(scheme: ColorScheme, dark: Boolean): Color =
+    Color.hsl(
+        hue = (colorHue(scheme.primary) + 46f) % 360f,
+        saturation = if (dark) 0.44f else 0.50f,
+        lightness = if (dark) 0.52f else 0.66f,
+    )
+
+/** Neutral ink surfaces plus the accent as a luminous light pool. The card layers
+ *  are translucent with a specular top rim so they read as refractive glass over
+ *  the ambient pools; real blur is reserved for the floating dock to keep the
+ *  per-card cost down. */
 internal fun glassPalette(scheme: ColorScheme, dark: Boolean): DaeGlassPalette =
     if (dark) {
         DaeGlassPalette(
@@ -177,13 +187,14 @@ internal fun glassPalette(scheme: ColorScheme, dark: Boolean): DaeGlassPalette =
             baseTop = Color(0xFF0D0E0E),
             baseBottom = Color(0xFF080909),
             ambientCool = scheme.primary,
-            ambientDeep = scheme.primary,
-            glassTop = Color.White.copy(alpha = 0.075f),
-            glassBottom = Color.White.copy(alpha = 0.040f),
-            borderTop = Color.White.copy(alpha = 0.12f),
-            borderBottom = Color.White.copy(alpha = 0.05f),
+            ambientDeep = ambientCounter(scheme, dark = true),
+            glassTop = Color.White.copy(alpha = 0.14f),
+            glassBottom = Color.White.copy(alpha = 0.055f),
+            borderTop = Color.White.copy(alpha = 0.32f),
+            borderBottom = Color.White.copy(alpha = 0.07f),
+            innerHighlight = Color.White.copy(alpha = 0.24f),
             shadow = Color.Black.copy(alpha = 0.45f),
-            glow = scheme.primary.copy(alpha = 0.18f),
+            glow = scheme.primary.copy(alpha = 0.34f),
             dockTint = Color.Black.copy(alpha = 0.28f),
             fallbackTint = Color(0xFF141616).copy(alpha = 0.92f),
             success = SuccessDark,
@@ -195,14 +206,15 @@ internal fun glassPalette(scheme: ColorScheme, dark: Boolean): DaeGlassPalette =
             baseTop = Color(0xFFF7F7F4),
             baseBottom = Color(0xFFEFEFEB),
             ambientCool = scheme.primary,
-            ambientDeep = scheme.primary,
-            glassTop = Color.White.copy(alpha = 0.86f),
-            glassBottom = Color.White.copy(alpha = 0.76f),
-            borderTop = Color.Black.copy(alpha = 0.05f),
-            borderBottom = Color.Black.copy(alpha = 0.03f),
+            ambientDeep = ambientCounter(scheme, dark = false),
+            glassTop = Color.White.copy(alpha = 0.70f),
+            glassBottom = Color.White.copy(alpha = 0.55f),
+            borderTop = Color.White.copy(alpha = 0.85f),
+            borderBottom = Color.Black.copy(alpha = 0.05f),
+            innerHighlight = Color.White.copy(alpha = 0.70f),
             shadow = Color.Black.copy(alpha = 0.07f),
             glow = scheme.primary.copy(alpha = 0.12f),
-            dockTint = Color.White.copy(alpha = 0.55f),
+            dockTint = Color.White.copy(alpha = 0.60f),
             fallbackTint = Color.White.copy(alpha = 0.90f),
             success = SuccessLight,
             warning = WarningLight,

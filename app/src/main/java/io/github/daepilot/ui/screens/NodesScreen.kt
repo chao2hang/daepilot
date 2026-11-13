@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.MoreVert
@@ -72,6 +73,7 @@ import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.Format
 import io.github.daepilot.ui.components.ConfirmDialog
 import io.github.daepilot.ui.components.DaeChip
+import io.github.daepilot.ui.components.DaeGlassRowShape
 import io.github.daepilot.ui.components.EmptyState
 import io.github.daepilot.ui.components.GlassSearchField
 import io.github.daepilot.ui.components.GlassSurface
@@ -79,7 +81,7 @@ import io.github.daepilot.ui.components.GroupEditorSheet
 import io.github.daepilot.ui.components.ScreenBottom
 import io.github.daepilot.ui.components.ScreenEdge
 import io.github.daepilot.ui.components.ScreenHeader
-import io.github.daepilot.ui.theme.LocalDaeGlassPalette
+import io.github.daepilot.ui.components.latencyTone
 
 private enum class NodeSort(val label: String) {
     DEFAULT("默认顺序"),
@@ -364,6 +366,7 @@ fun NodesScreen(
                                 viewModel.setNodeSkipCertVerify(node.id, !node.skipCertVerify)
                             },
                             onDelete = { deleteTarget = node },
+                            onCopied = { viewModel.toast("节点链接已复制") },
                         )
                     }
                 }
@@ -568,7 +571,7 @@ private fun DefaultOutboundCard(
     }
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        shape = DaeGlassRowShape,
         contentPadding = PaddingValues(start = 16.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
         spacing = 0.dp,
         elevation = 6.dp,
@@ -589,11 +592,13 @@ private fun DefaultOutboundCard(
                     modifier = Modifier.padding(top = 2.dp),
                 )
             }
-            Text(
-                "›",
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 8.dp),
+            Icon(
+                Icons.Outlined.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(start = 8.dp)
+                    .size(18.dp),
             )
         }
     }
@@ -607,7 +612,7 @@ private fun SelectionBar(
 ) {
     GlassSurface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
+        shape = DaeGlassRowShape,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         spacing = 0.dp,
         elevation = 12.dp,
@@ -643,6 +648,7 @@ private fun NodeRow(
     onFavorite: () -> Unit,
     onToggleSkipCert: () -> Unit,
     onDelete: () -> Unit,
+    onCopied: () -> Unit = {},
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
@@ -654,7 +660,7 @@ private fun NodeRow(
     val marked = if (selectionMode) selectedForGroup else selected
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        shape = DaeGlassRowShape,
         contentPadding = PaddingValues(start = 14.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
         spacing = 0.dp,
         elevation = 6.dp,
@@ -818,6 +824,7 @@ private fun NodeRow(
                             onClick = {
                                 menuOpen = false
                                 clipboard.setText(AnnotatedString(node.link))
+                                onCopied()
                             },
                         )
                         if (node.subscriptionId == null) {
@@ -897,14 +904,8 @@ private fun LatencyPill(
     failed: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val palette = LocalDaeGlassPalette.current
-    val (text, color) = when {
-        millis != null && millis < 100 -> "$millis ms" to palette.success
-        millis != null && millis < 250 -> "$millis ms" to palette.warning
-        millis != null -> "$millis ms" to MaterialTheme.colorScheme.error
-        failed -> "不可用" to MaterialTheme.colorScheme.error
-        else -> return
-    }
+    val color = if (millis == null && !failed) return else latencyTone(millis)
+    val text = if (millis != null) "$millis ms" else "不可用"
     Text(
         text,
         style = MaterialTheme.typography.labelSmall,
@@ -931,7 +932,7 @@ private fun GroupCard(
     val empty = members.isEmpty()
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        shape = DaeGlassRowShape,
         contentPadding = PaddingValues(start = 14.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
         spacing = 0.dp,
         elevation = 6.dp,

@@ -294,23 +294,73 @@ class DaeConfigRendererTest {
             ),
         )
         val play = config.indexOf(
-            "domain(suffix: services.googleapis.cn, suffix: gvt1.com, " +
-                "suffix: gvt2.com, suffix: dl.google.com) -> proxy",
+            "domain(suffix: play.googleapis.com, suffix: play-fe.googleapis.com, " +
+                "suffix: android.clients.google.com, suffix: services.googleapis.cn, " +
+                "suffix: gvt1-cn.com, suffix: gvt2-cn.com, suffix: gvt1.com, " +
+                "suffix: gvt2.com, suffix: dl.google.com, " +
+                "suffix: xn--ngstr-lra8j.com) -> proxy",
         )
         val cn = config.indexOf("domain(geosite:cn) -> direct")
         assertTrue(play in 0 until cn)
+        assertFalse(config.contains("services.googleapis.cn, suffix: gvt1-cn.com, " +
+            "suffix: gvt2-cn.com) -> direct"))
         assertTrue(DaeConfigValidator.quickCheckConfig(config).ok)
     }
 
     @Test
     fun playFrontendsResolveDomesticallyWithoutTheProxy() {
         val config = render(RenderSpec(nodes = listOf(hk)))
-        val rule = config.indexOf("qname(suffix: play.googleapis.com")
-        val aaaa = config.indexOf("qtype(AAAA) && !qname(geosite:cn) -> reject")
+        val aaaa = config.indexOf(
+            "qtype(AAAA) && qname(suffix: play.googleapis.com, " +
+                "suffix: play-fe.googleapis.com, suffix: android.clients.google.com, " +
+                "suffix: googleapis.cn, suffix: services.googleapis.cn, suffix: gvt1-cn.com, " +
+                "suffix: gvt2-cn.com, suffix: gvt1.com, suffix: gvt2.com, " +
+                "suffix: dl.google.com, suffix: xn--ngstr-lra8j.com) -> reject",
+        )
+        val downloadDns = config.indexOf(
+            "qname(suffix: services.googleapis.cn, suffix: gvt1-cn.com, " +
+                "suffix: gvt2-cn.com, suffix: gvt1.com, suffix: gvt2.com, " +
+                "suffix: dl.google.com, suffix: xn--ngstr-lra8j.com) -> googledns",
+        )
+        val geosite = config.indexOf("qname(geosite:cn) -> alidns")
+        val genericAaaa = config.indexOf("qtype(AAAA) && !qname(geosite:cn) -> reject")
+        val rule = config.indexOf(
+            "qname(suffix: play.googleapis.com, suffix: play-fe.googleapis.com, " +
+                "suffix: android.clients.google.com, suffix: googleapis.cn) -> alidns",
+        )
         val fallback = config.indexOf("fallback: googledns")
+        assertTrue(aaaa in 0 until downloadDns)
+        assertTrue(downloadDns in 0 until geosite)
+        assertTrue(geosite in 0 until genericAaaa)
+        assertTrue(genericAaaa in 0 until rule)
         assertTrue(rule in 0 until fallback)
-        assertTrue(aaaa in 0 until rule)
-        assertTrue(config.contains("suffix: services.googleapis.cn, suffix: gvt1.com"))
+        // Every download host resolves abroad: the domestic answer for
+        // services.googleapis.cn is the GGC cache that stalls at zero bytes,
+        // and the dashed CDN names otherwise SERVFAIL.
+        val alidnsLine = config.lineSequence().first {
+            it.contains("qname(suffix: play.googleapis.com") && it.contains("-> alidns")
+        }
+        assertFalse(alidnsLine.contains("services.googleapis.cn"))
+        assertFalse(alidnsLine.contains("gvt1.com"))
+        assertFalse(alidnsLine.contains("gvt2.com"))
+        assertFalse(alidnsLine.contains("dl.google.com"))
+        assertFalse(alidnsLine.contains("xn--ngstr-lra8j.com"))
+    }
+
+    @Test
+    fun playCdnIpv6IsRejectedBeforeEveryOtherDnsRule() {
+        val config = render(RenderSpec(nodes = listOf(hk, jp)))
+        val playAaaa = config.indexOf(
+            "qtype(AAAA) && qname(suffix: play.googleapis.com, " +
+                "suffix: play-fe.googleapis.com, suffix: android.clients.google.com, " +
+                "suffix: googleapis.cn, suffix: services.googleapis.cn, suffix: gvt1-cn.com, " +
+                "suffix: gvt2-cn.com, suffix: gvt1.com, suffix: gvt2.com, " +
+                "suffix: dl.google.com, suffix: xn--ngstr-lra8j.com) -> reject",
+        )
+        val geosite = config.indexOf("qname(geosite:cn) -> alidns")
+        val nodeDns = config.indexOf("qname(suffix: example.com) -> alidns")
+        assertTrue(playAaaa in 0 until geosite)
+        assertTrue(playAaaa in 0 until nodeDns)
     }
 
     @Test
@@ -342,10 +392,19 @@ class DaeConfigRendererTest {
         assertTrue(
             config.contains(
                 "    request {\n" +
+                    "      qtype(AAAA) && qname(suffix: play.googleapis.com, " +
+                    "suffix: play-fe.googleapis.com, suffix: android.clients.google.com, " +
+                    "suffix: googleapis.cn, suffix: services.googleapis.cn, " +
+                    "suffix: gvt1-cn.com, suffix: gvt2-cn.com, suffix: gvt1.com, " +
+                    "suffix: gvt2.com, suffix: dl.google.com, " +
+                    "suffix: xn--ngstr-lra8j.com) -> reject\n" +
+                    "      qname(suffix: services.googleapis.cn, suffix: gvt1-cn.com, " +
+                    "suffix: gvt2-cn.com, suffix: gvt1.com, suffix: gvt2.com, " +
+                    "suffix: dl.google.com, suffix: xn--ngstr-lra8j.com) -> googledns\n" +
                     "      qname(geosite:cn) -> alidns\n" +
                     "      qtype(AAAA) && !qname(geosite:cn) -> reject\n" +
-                    "      qname(suffix: play.googleapis.com, suffix: googleapis.cn, " +
-                    "suffix: services.googleapis.cn, suffix: gvt1.com, suffix: gvt2.com) -> alidns\n" +
+                    "      qname(suffix: play.googleapis.com, suffix: play-fe.googleapis.com, " +
+                    "suffix: android.clients.google.com, suffix: googleapis.cn) -> alidns\n" +
                     "      fallback: googledns\n" +
                     "    }",
             ),
@@ -368,16 +427,55 @@ class DaeConfigRendererTest {
     }
 
     @Test
-    fun blockedIpv6IsRejectedAfterCnDirectRules() {
-        val config = render(RenderSpec(nodes = listOf(hk), template = RoutingTemplate.BYPASS_MAINLAND))
-        assertTrue(config.contains("ipversion(6) -> block"))
-        // CN IPv6 must still match direct before the catch-all IPv6 block.
+    fun bypassMainlandBlocksProxiedIpv6BeforeCustomAndPlayRules() {
+        val custom = RoutingRule("r1", "domain(example.com)", "proxy")
+        val config = render(
+            RenderSpec(
+                nodes = listOf(hk),
+                template = RoutingTemplate.BYPASS_MAINLAND,
+                customRules = listOf(custom),
+            ),
+        )
+        val blockIndex = config.indexOf("ipversion(6) && !dip(geoip:cn) -> block")
+        val customIndex = config.indexOf("domain(example.com) -> proxy")
+        val playIndex = config.indexOf("domain(suffix: play.googleapis.com")
         val cnIndex = config.indexOf("dip(geoip:cn) -> direct")
-        val blockIndex = config.indexOf("ipversion(6) -> block")
         val fallbackIndex = config.indexOf("fallback: proxy")
-        assertTrue(cnIndex in 0 until blockIndex)
-        assertTrue(blockIndex in 0 until fallbackIndex)
+        // Blocked before a leaked/cached AAAA can hit a proxy rule, but CN IPv6
+        // still reaches its direct rule.
+        assertTrue(blockIndex in 0 until customIndex)
+        assertTrue(blockIndex in 0 until playIndex)
+        assertTrue(blockIndex in 0 until cnIndex)
+        assertTrue(playIndex in 0 until cnIndex)
+        assertTrue(cnIndex in 0 until fallbackIndex)
+        assertFalse(config.contains("  ipversion(6) -> block\n"))
         assertTrue(DaeConfigValidator.quickCheckConfig(config).ok)
+    }
+
+    @Test
+    fun templatesWithoutCnDirectBlockAllIpv6BeforeCustomRules() {
+        val custom = RoutingRule("r1", "domain(example.com)", "direct")
+        val global = render(
+            RenderSpec(
+                nodes = listOf(hk),
+                template = RoutingTemplate.GLOBAL,
+                customRules = listOf(custom),
+            ),
+        )
+        val blockIndex = global.indexOf("  ipversion(6) -> block\n")
+        val customIndex = global.indexOf("domain(example.com) -> direct")
+        assertTrue(blockIndex in 0 until customIndex)
+        assertTrue(DaeConfigValidator.quickCheckConfig(global).ok)
+
+        val whitelist = render(
+            RenderSpec(
+                nodes = listOf(hk),
+                template = RoutingTemplate.WHITELIST,
+                customRules = listOf(custom),
+            ),
+        )
+        assertTrue(whitelist.contains("  ipversion(6) -> block\n"))
+        assertTrue(DaeConfigValidator.quickCheckConfig(whitelist).ok)
     }
 
     @Test
@@ -413,6 +511,15 @@ class DaeConfigRendererTest {
         assertTrue(
             render(RenderSpec(nodes = listOf(hk), dialMode = "bogus"))
                 .contains("  dial_mode: ip\n"),
+        )
+    }
+
+    @Test
+    fun lanInterfaceIsOnlyRenderedForTetherSharing() {
+        assertFalse(render(RenderSpec(nodes = listOf(hk))).contains("lan_interface"))
+        assertTrue(
+            render(RenderSpec(nodes = listOf(hk), lanInterface = "auto"))
+                .contains("  lan_interface: auto\n"),
         )
     }
 

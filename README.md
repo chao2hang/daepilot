@@ -20,6 +20,7 @@ DaePilot 是 [dae](https://github.com/daeuniverse/dae) eBPF 透明代理的 Andr
 - 崩溃自动恢复：模块 watchdog 每 15 秒检查一次，daemon 退出后自动拉起
 - 开机自启（App 开关 + 模块 `service.sh`，不依赖 App 启动；boot 后等全局 IPv4、刷新 `wan_interface`（Android 重启可能把 rmnet_dataN 改名）、重试启动并补启 watchdog，不再等待主路由表默认路由 60 秒）
 - 兼容性自检：内核版本、BTF、cgroup2、BPF JIT、可用内存、root、模块与冲突进程
+- 热点 / USB 共享：「设置 → 网络 → 热点共享」打开后，连接本机热点或 USB 网络的设备也走代理；接口自动识别，绑定失败时降级为仅本机代理
 
 ## 架构
 
@@ -53,15 +54,16 @@ Magisk module
 - **内存锁**：启动前把 `RLIMIT_MEMLOCK` 提到 unlimited。Android 默认上限 64 KiB，dae 加载 geoip/geosite 时 LPM map 更新会报 `newLpmMap: batch update: cannot allocate memory` 并直接退出。
 - **DNS 交接**：App 把当前网络的 `LinkProperties.dnsServers` 写入 `run/dns.servers`，`daepilotctl` 再写入 rootfs 的 `/etc/resolv.conf`，供 dae 内 Go resolver 解析节点域名；配置里不再写死 `bootstrap_resolver`。解析器优先使用当前 WAN 的实况 DNS：部分运营商丢弃 `119.29.29.29` 等公共 DNS，只有运营商自己的 DNS 可达，因此内置的国内上游会在落配置时自动替换为当前 WAN 的 DNS。
 - **蜂窝 DNS 回退**：在部分移动网络上，dae 的 DNS 劫持会捕获它自己发往公网 DNS 的查询，导致运营商 DNS 直连超时（原始 UDP 查询正常）。`daepilotctl` 在 WAN 为 `rmnet*` 且存在代理节点时，把 `qname(geosite:cn)` 的解析改走代理的 `googledns`；Wi-Fi 仍使用路由器/运营商 DNS 直连。诊断弹窗会显示当前 WAN、IP、DNS 列表、DNS 模式（直连/国内经代理）、节点与最近错误。
-- **IPv4 节点 AAAA 过滤**：节点没有 IPv6 出口时，Chrome / X 等应用优先使用 AAAA，代理拨号 IPv6 会 `network is unreachable`。存在代理节点时，`daepilotctl` 在 DNS request 中拒绝非国内域名的 AAAA（国内 IPv6 保留），应用自动回退 IPv4；诊断弹窗显示 IPv6 模式。
-- **国内/海外 DNS 分流**：国内域名默认走 `https://223.5.5.5/dns-query`（AliDNS DoH），海外域名走 `https://1.1.1.1/dns-query`（Cloudflare DoH）；两者都不使用 UDP 53。蜂窝下 ctl 只在 `alidns` 仍是 UDP 时才把国内域名回退到 `googledns`，DoH 国内上游会保留 `qname(geosite:cn) -> alidns`，避免运营商 DNS 污染和节点丢弃 UDP 53。旧默认 `udp://119.29.29.29:53` / `tcp+udp://8.8.8.8:53` 会在 App 启动时自动迁移，自定义上游保持不动。可在「分流 → DNS」改成自己的解析器。连通性测试改为串行探测，避免慢节点被五个并发 TLS 握手压垮后误报。
+- **IPv4 节点 AAAA 过滤**：节点没有 IPv6 出口时，Chrome / X 等应用优先使用 AAAA，代理拨号 IPv6 会 `network is unreachable`。渲染器在 DNS request 最前面拒绝全部 Play 域名的 AAAA（即使它们被 geosite 归为国内），再拒绝非国内域名的 AAAA；同时在 routing 中把非国内 IPv6 的阻断放在自定义规则和 Play 代理规则之前，避免缓存的 AAAA 被代理规则接走。绕过大陆模板仍保留国内 IPv6 直连，其余模板直接阻断全部 IPv6。诊断弹窗显示 IPv6 模式。
+- **国内/海外 DNS 分流**：国内域名默认走 `https://223.5.5.5/dns-query`（AliDNS DoH），海外域名走 `https://1.1.1.1/dns-query`（Cloudflare DoH）；两者都不使用 UDP 53。蜂窝下 ctl 只在 `alidns` 仍是 UDP 时才把国内域名回退到 `googledns`，DoH 国内上游会保留 `qname(geosite:cn) -> alidns`，避免运营商 DNS 污染和节点丢弃 UDP 53。Play 下载域名是例外：它们的 `qname(...) -> googledns` 规则排在 `qname(geosite:cn)` 之前，避免 `services.googleapis.cn` 被国内解析到无数据的 GGC 缓存。旧默认 `udp://119.29.29.29:53` / `tcp+udp://8.8.8.8:53` 会在 App 启动时自动迁移，自定义上游保持不动。可在「分流 → DNS」改成自己的解析器。连通性测试改为串行探测，避免慢节点被五个并发 TLS 握手压垮后误报。
 - **节点域名直解**：节点服务器是海外域名时，dae 的 bootstrap 查询同样会被自己的 DNS 劫持捕获，海外域名走 `googledns` 又要经过尚未建立、且正等待该解析的隧道，结果是 `bootstrap resolver returned no usable address`，整个节点组全灭。渲染时把所有节点服务域名额外指向国内上游（`qname(suffix: 节点域名...) -> alidns`），解析不依赖隧道。
-- **Play 下载走代理**：绕过大陆模板在 `domain(geosite:cn)` 之前把 `services.googleapis.cn`、`gvt1.com`、`gvt2.com`、`dl.google.com` 指向代理分组。Play 的国内下载前端解析到中国移动 GGC 缓存 IP，落在 `geoip:cn` 内会直连，而该直连链路在部分移动网络上稳定 0 B/s，经代理访问同一缓存反而正常。
+- **Play 下载走代理**：绕过大陆模板在 `domain(geosite:cn)` 之前把 Play API 和全部下载域名（`services.googleapis.cn`、`gvt1.com`、`gvt2.com`、`gvt1-cn.com`、`gvt2-cn.com`、`dl.google.com`、`xn--ngstr-lra8j.com`）指向代理分组，并让这些下载域名经海外 DNS 解析。`services.googleapis.cn` 的国内解析会返回中国移动 GGC 缓存 IP，连接虽然建立但在部分移动网络上稳定 0 B/s；海外解析返回 Google 全球前端，代理下载正常。API 和下载保持同一代理出口，避免发货 URL 与下载出口不一致。
 - **证书自动判定**：切换后若出口探测失败，App 会用真实 TLS 握手验证当前选择节点的证书（相同 SNI、同一平台信任库）。只有确实被判定为不可信（自签名 / 名称不匹配）的节点才自动打开「跳过证书校验」并重新下发配置，连通性本身失败的节点不会被误开放。
 - **切换成功以真实请求为准**：连接状态只有在站点探测（Google，失败时再用 YouTube 复核）经隧道返回成功后才算成功；Cloudflare trace 只补充出口 IP，并且探测优先解析 IPv4——隧道中断时 trace 仍可能被直连 IPv6 回答，会把失败的切换显示成「已连接 · 出口 …」。
 - **小米超级岛（焦点通知）**：HyperOS 的岛不是应用内控件，而是系统按「焦点通知」渲染的通知栏上方胶囊。App 通过 `Notification.extras` 附带 `miui.focus.param` / `miui.focus.pics`，并先用 `content://miui.statusbar.notification.public` 的 `canShowFocus` / `isSupportIsland` 探测授权，未授权时自动退回普通通知，因此非小米设备也不会异常。系统只放行 xmsf 授权过的应用（`com.xiaomi.xmsf` 的 `auth_database.db`：`apkSigns` 记录签名摘要、`scopeInfos` 的 scope 20032 即焦点通知授权，两者缺一就 `onAuthFailed`），官方途径是给应用申请小米开放平台 AppID；在已 root 的设备上可用 `tools/enable_xiaomi_island.py enable` 直接写入这条本地授权缓存（`status` 查看；root 只能原地覆写该文件、不能截断或换 inode，脚本用 `dd conv=notrunc` 并清空 WAL/SHM 后再重启 xmsf）。撤销授权建议直接清除 xmsf 数据或在 MIUI 通知设置里关闭，`disable` 只删行，xmsf 可能把缓存写回。
 - **Resolver 清洗**：Android `dumpsys` 输出的 DNS 形如 `/10.0.2.3`，写入 `resolv.conf` 前会去掉 `/`、方括号和 zone id；否则整份文件非法，dae 的 Go resolver 会回落到 `[::1]:53`，网络检查/节点解析直接失败。
 - **Wi-Fi / 蜂窝双 WAN**：`wan_interface: auto` 由 `daepilotctl` 从 Android policy routing 解析当前默认接口（`wlan0`、`rmnet_dataN` 等），watchdog 检测到接口变化后自动重启 dae，避免 Wi-Fi/移动数据切换后仍绑定旧接口。模拟器上已验证 Wi-Fi → 移动数据切换后自动 `Bind to WAN: eth0` 并继续代理。
+- **热点 / USB 共享（LAN 绑定）**：热点客户端的报文走 FORWARD 路径，没有本机 socket，dae 的 socket / WAN hook 都看不到，只有 `lan_interface` 的 TC ingress 能捕获。App 只渲染 `lan_interface: auto`，`daepilotctl` 在落配置时解析成具体接口：Wi-Fi 热点按 `iw dev` 的 `type AP` 识别（HyperOS 上是 `wlan2`，不是名字里的 `wlan0`），USB 共享按 `usbN` / `rndisN` / `ncmN` / `bt-pan` 匹配，并要求接口 UP 且有 IPv4、不是 WAN 本身；多个接口用逗号连接（dae 的 parser 按 `,` 拆分且不 trim 空格）。没有共享时直接删掉这一行，`config/config.dae` 始终保留 `auto` 意图。Android 的 tethering BPF offload（`prog_offload_schedcls_tether_upstream4/6_ether`）会让 dae 的 TCX attach 返回 `EINVAL` 并 FATAL 退出，因此绑定前只删除这些 offload filter（保留其它 filter 与 dae 自己的 link），热点本身仍由 netd 的 iptables 转发。绑定失败先重试一次，再删掉 LAN 行降级启动——本机代理不受影响，`status` 用 `lan` / `lan_hook` / `lan_clients` 上报实际结果。watchdog 每 15 秒比对接口集合，两次一致才重启（约 30 秒生效），并在接口未变时周期性重清 offload（系统重新开关热点会把它加回来）。
 - **rmnet 兼容**：模块自带的 dae payload 使用 L3 WAN egress hook，适配 Android rmnet 的 raw-IP；官方 L2 构建在 rmnet 上抓不到本地流量，因此不要替换移动网络场景下的 payload。
 - **节点地址固定**：启动/应用配置前用 Android 系统 resolver 解析代理组节点域名，写入 chroot 的 `/etc/hosts`，并把配置里的节点 URL 直接替换为解析出的 IPv4（同时把该域名的 `must_direct` 规则改为 IP），因为该 dae 构建的 bootstrap resolver 不读取 `/etc/hosts`；重写后恢复 `0600`，否则 dae 会拒绝权限过宽的配置。热重载时保留已解析结果，并为新节点补做解析。
 - **进程判定**：`status` / watchdog 不再只看 `kill -0`：还要排除 zombie（读 `/proc/<pid>/stat` 状态位）并校验 cmdline 是本次 chroot 的 `dae run -c /config/config.dae`，避免残留 PID 被误判为运行中而阻止重启。
@@ -119,6 +121,7 @@ dae 在 chroot 中以配置所在目录（`/config`）为基准查找 `geosite.d
 5. 添加订阅，等待解析，选择节点。
 6. 在「分流」中选择模板，按需编辑规则与 DNS。
 7. 回到首页启动代理。TProxy 端口默认 `12345`，修改后需重新应用配置。
+8. 需要让热点 / USB 共享的设备也走代理时，打开「设置 → 网络 → 热点共享」，再开启热点或插入 USB 网络共享；约 30 秒后开关下方会显示已绑定的接口与客户端数量。
 
 Magisk 管理器中的模块「动作」按钮可直接启停 dae。
 
@@ -150,9 +153,17 @@ dae 的数据面走 TC/eBPF，不是 iptables/nftables TPROXY；`so_mark_from_da
 - hysteria2 / TUIC 走 QUIC，蜂窝链路丢包会同时拖慢所有 QUIC 客户端。实测 15% 丢包时独立 hysteria 客户端与 dae 一起掉到几十 KB/s，属于链路问题而非 dae。
 - `DAE_ALLOW_TCP_SOCKMAP=1` 的 TCP relay eBPF offload 需要支持 inner accounting 的 kprobe ABI；部分内核会以 `attach tcp_offload_sent_account` 失败并回落到用户态转发。实测直连吞吐约 980 KB/s，未成为瓶颈。
 
+### 已知限制：热点 / USB 共享
+
+- 共享设备的报文走 FORWARD，只有 `lan_interface` 的 TC ingress 能捕获。内核不支持 LAN 绑定（dae 期望 ≥ 5.15，只报 WARN）或 TCX attach 失败时，ctl 扫描本次启动日志判定并降级为仅本机代理；设置页开关下方与诊断弹窗会显示「热点接口绑定失败」。
+- 绑定前删除系统的 tethering BPF offload filter，热点转发回落到 netd 的 iptables 软件路径，共享吞吐低于 offload——这是让 dae 挂上 TC hook 的必要代价。重新开关热点会把 offload 加回来，watchdog 在接口未变时周期性重清。
+- 热点开启 / USB 插拔后约 30 秒生效（watchdog 15 秒一轮，连续两次检测到接口集合变化才重启 dae），重启期间本机代理也会短暂中断。
+- 客户端仍会从运营商拿到 IPv6 前缀（实测 `240a:…/64`）。本机的「阻止 IPv6」作用于经 dae 的解析与路由；客户端自带的加密 DNS（Android 私人 DNS、iCloud 私有中继）不经 dae 的 DNS 分流，域名规则会退化为 IP 规则，必要时在客户端侧关闭。
+- `pname(...)` 与「分应用绕过」都基于本机 UID，对共享设备无效。
+
 ## 回归测试覆盖
 
-`sh tools/test-daepilotctl.sh` 目前覆盖：Wi-Fi / 蜂窝 rmnet policy routing、VPN tun/dummy 排除、CRLF 配置、`dumpsys` 的 `/IP` 清洗、无 IPv6 默认路由时过滤 IPv6 DNS、运营商 DNS 注入（含移动网络）、自定义上游保留、节点 URL IP 固定、蜂窝国内 DNS 经代理回退、非国内 AAAA 过滤、热重载换节点重启、geo 配置损坏回滚、私有 mount namespace、zombie watchdog、节点 hosts pin。真机另验证了蜂窝/Wi-Fi 双向切换、Google/YouTube 代理、节点切换与 5 轮启停后 `/dev/binderfs` 完好。
+`sh tools/test-daepilotctl.sh` 目前覆盖：Wi-Fi / 蜂窝 rmnet policy routing、VPN tun/dummy 排除、CRLF 配置、`dumpsys` 的 `/IP` 清洗、无 IPv6 默认路由时过滤 IPv6 DNS、运营商 DNS 注入（含移动网络）、自定义上游保留、节点 URL IP 固定、蜂窝国内 DNS 经代理回退、非国内 AAAA 过滤、热重载换节点重启、geo 配置损坏回滚、私有 mount namespace、zombie watchdog、节点 hosts pin，以及热点共享的 LAN 探测（`iw` type AP、USB 接口、无 `iw` 回退）、无共享时删除 `lan_interface`、多接口逗号列表、tethering offload 精确清理（保留无关 filter）、FATAL 与 WARN 两种绑定失败降级、热重载与 watchdog 的 LAN 分支。真机另验证了蜂窝/Wi-Fi 双向切换、Google/YouTube 代理、节点切换与 5 轮启停后 `/dev/binderfs` 完好；新 ctl 在真机（kernel 6.12 / HyperOS）验证了无热点时 `start` 与 `apply --reload` 均正常、`lan_interface` 被正确删除、本机代理不受影响（Google 204 ≈ 0.6 s）。
 
 ## 许可
 

@@ -49,6 +49,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -76,6 +77,7 @@ import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.haze
 import dev.chrisbanes.haze.hazeChild
+import io.github.daepilot.core.model.ConnectionPhase
 import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.components.AmbientBackground
 import io.github.daepilot.ui.components.ConnectionBanner
@@ -183,7 +185,10 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
     val hazeState = remember { HazeState() }
 
     LaunchedEffect(Unit) {
-        viewModel.messages.collect { snackbar.showSnackbar(it) }
+        viewModel.messages.collect { message ->
+            val result = snackbar.showSnackbar(message.text, message.actionLabel)
+            if (result == SnackbarResult.ActionPerformed) viewModel.toggleProxy(true)
+        }
     }
 
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -222,12 +227,6 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
                         .fillMaxSize()
                         .statusBarsPadding(),
                 ) {
-                    ConnectionBanner(
-                        state = connection,
-                        running = status.running,
-                        onRefresh = viewModel::refreshExit,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
-                    )
                     NavHost(
                         navController = navController,
                         startDestination = "home",
@@ -277,6 +276,29 @@ private fun DaePilotRoot(viewModel: AppViewModel) {
                 }
             }
 
+            // Off home there is no hero to carry the exit state, so a switch in
+            // flight or a failure floats above the dock instead of a permanent strip.
+            if (status.running && currentRoute != "home" &&
+                (connection.phase == ConnectionPhase.APPLYING ||
+                    connection.phase == ConnectionPhase.VERIFYING ||
+                    connection.phase == ConnectionPhase.FAILED)
+            ) {
+                ConnectionBanner(
+                    state = connection,
+                    running = true,
+                    onRefresh = viewModel::refreshExit,
+                    compact = true,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .navigationBarsPadding()
+                        .padding(
+                            start = 16.dp,
+                            end = 16.dp,
+                            bottom = if (currentRoute in tabRoutes) 82.dp else 20.dp,
+                        ),
+                )
+            }
+
             if (currentRoute in tabRoutes) {
                 DaeBottomBar(
                     currentRoute = currentRoute,
@@ -312,7 +334,7 @@ private fun DaeBottomBar(
     val style = HazeStyle(
         backgroundColor = MaterialTheme.colorScheme.surface,
         tints = listOf(HazeTint(palette.dockTint)),
-        blurRadius = 24.dp,
+        blurRadius = 30.dp,
         noiseFactor = 0.04f,
         fallbackTint = HazeTint(palette.fallbackTint),
     )
@@ -329,7 +351,7 @@ private fun DaeBottomBar(
             .clip(shape)
             .hazeChild(hazeState, style)
             .border(
-                0.75.dp,
+                1.dp,
                 Brush.verticalGradient(listOf(palette.borderTop, palette.borderBottom)),
                 shape,
             )

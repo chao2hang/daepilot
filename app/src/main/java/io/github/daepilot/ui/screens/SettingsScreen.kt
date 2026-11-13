@@ -13,12 +13,14 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -56,6 +58,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
@@ -67,6 +71,7 @@ import io.github.daepilot.core.model.DaemonStatus
 import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.components.BypassAppSheet
 import io.github.daepilot.ui.components.ConfirmDialog
+import io.github.daepilot.ui.components.DaeGlassRadius
 import io.github.daepilot.ui.components.DiagnosticsDialog
 import io.github.daepilot.ui.components.GroupLabel
 import io.github.daepilot.ui.components.KeyValueRow
@@ -79,6 +84,7 @@ import io.github.daepilot.ui.components.ScreenBottom
 import io.github.daepilot.ui.components.ScreenEdge
 import io.github.daepilot.ui.components.ScreenHeader
 import io.github.daepilot.ui.theme.AccentChoice
+import io.github.daepilot.ui.theme.LocalDaeGlassPalette
 
 private val logLevels = listOf("trace", "debug", "info", "warn", "error", "fatal")
 private val themeModes = listOf(
@@ -209,7 +215,21 @@ fun SettingsScreen(
             val pnameUnavailable = status.pnameRouting == false ||
                 compatibility?.pnameRouting == false
             val bypassCount = snapshot.settings.bypassPackages.size
+            val lan = status.lan?.takeIf { it.isNotBlank() }
             ListGroup {
+                SwitchRow(
+                    title = "热点共享",
+                    description = when {
+                        !snapshot.settings.tetherShare -> "热点 / USB 共享的设备也走代理"
+                        status.lanHook == "failed" -> "热点接口绑定失败，仅本机代理"
+                        lan == null -> "开启热点后自动生效（约 30 秒）"
+                        else -> "已绑定 $lan" +
+                            (status.lanClients?.let { " · $it 台设备" } ?: "")
+                    },
+                    checked = snapshot.settings.tetherShare,
+                    onCheckedChange = viewModel::setTetherShare,
+                )
+                RowDivider()
                 ListRow(
                     title = "分应用绕过",
                     description = when {
@@ -337,7 +357,14 @@ fun SettingsScreen(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    KeyValueRow("运行模式", modeLabel(status.mode))
+                    val palette = LocalDaeGlassPalette.current
+                    val modeTone = when {
+                        status.running -> palette.success
+                        status.lastError?.isNotBlank() == true -> MaterialTheme.colorScheme.error
+                        status.mode == "no-root" || status.mode == "module-missing" -> palette.warning
+                        else -> MaterialTheme.colorScheme.onSurface
+                    }
+                    KeyValueRow("运行模式", modeLabel(status.mode), valueColor = modeTone)
                     status.lastError?.takeIf { it.isNotBlank() }?.let {
                         Text(
                             it,
@@ -448,6 +475,7 @@ private fun effectiveAccent(id: String): AccentChoice {
     }
 }
 
+/** Toggles from anywhere on the row; the switch's own handler stays null so one tap counts once. */
 @Composable
 private fun SwitchRow(
     title: String,
@@ -458,7 +486,9 @@ private fun SwitchRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
+            .heightIn(min = 48.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -472,7 +502,11 @@ private fun SwitchRow(
             }
         }
         Spacer(Modifier.width(12.dp))
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(
+            checked = checked,
+            onCheckedChange = null,
+            modifier = Modifier.semantics { contentDescription = title },
+        )
     }
 }
 
@@ -552,6 +586,7 @@ private fun ThemeModeControl(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .selectableGroup()
             .clip(RoundedCornerShape(13.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .border(
@@ -585,7 +620,7 @@ private fun ThemeModeControl(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .height(32.dp)
+                    .heightIn(min = 44.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(background)
                     .selectable(
@@ -675,7 +710,7 @@ private fun AccentColorSheet(
         sheetState = sheetState,
         containerColor = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        shape = RoundedCornerShape(topStart = DaeGlassRadius, topEnd = DaeGlassRadius),
         dragHandle = {
             BottomSheetDefaults.DragHandle(
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),

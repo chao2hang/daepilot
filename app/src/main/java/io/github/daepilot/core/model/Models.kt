@@ -223,6 +223,12 @@ data class DaemonStatus(
     val dnsMode: String? = null,
     val ipv6Mode: String? = null,
     val pnameRouting: Boolean? = null,
+    val bypassUidCount: Int? = null,
+    /** Downstream interfaces bound for tethered clients, comma separated. */
+    val lan: String? = null,
+    val lanClients: Int? = null,
+    /** "ok" | "failed" | "absent": whether the LAN hooks actually attached. */
+    val lanHook: String? = null,
 )
 
 @Serializable
@@ -256,6 +262,7 @@ data class AppSettings(
     val bootStart: Boolean = true,
     val keepServiceRunning: Boolean = true,
     val bypassPackages: List<String> = emptyList(),
+    val tetherShare: Boolean = false,
     val tproxyPort: Int = 12345,
     val logLevel: String = "info",
     val subscriptionAutoUpdate: Boolean = true,

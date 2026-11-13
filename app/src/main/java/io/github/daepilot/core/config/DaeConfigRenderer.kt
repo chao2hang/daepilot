@@ -26,16 +26,51 @@ object DaeConfigRenderer {
     private val RESERVED = setOf("direct", "must_direct", "block")
 
     /**
-     * Hosts Play uses for app/APK downloads. services.googleapis.cn is the
-     * China download front end and is classified as a CN site, so it needs an
-     * explicit proxy rule in bypass-mainland mode.
+     * Play's download hosts.
+     *
+     * services.googleapis.cn is not a normal China site: a domestic resolver
+     * answers it with a GGC cache address that establishes a TCP connection
+     * and then delivers no bytes on some carriers. The same name resolved by
+     * the overseas resolver points at a global Google front end that the
+     * proxy can fetch, so every download host is resolved abroad and leaves
+     * through the proxy, exactly like the Play API that issues its URL.
+     *
+     * xn--ngstr-lra8j.com is the punycode alias Play's CDN actually hands out
+     * for most downloads (rr2---sn-*.xn--ngstr-lra8j.com). The dashed host
+     * names SERVFAIL on the domestic resolver and must be matched explicitly.
      */
     private val PLAY_DOWNLOAD_HOSTS = listOf(
         "services.googleapis.cn",
+        "gvt1-cn.com",
+        "gvt2-cn.com",
         "gvt1.com",
         "gvt2.com",
         "dl.google.com",
+        "xn--ngstr-lra8j.com",
     )
+
+    /**
+     * Play API front ends. They are outside the mainland and must keep the
+     * same egress as the global download CDNs, otherwise the delivery URL is
+     * issued for one address and fetched from another.
+     */
+    private val PLAY_API_HOSTS = listOf(
+        "play.googleapis.com",
+        "play-fe.googleapis.com",
+        "android.clients.google.com",
+    )
+
+    /**
+     * Play front ends that the domestic resolver answers correctly.
+     *
+     * Download hosts must NOT be listed here: the domestic answer for
+     * services.googleapis.cn is the stalled GGC cache, and the dashed CDN
+     * names either SERVFAIL or resolve to that same cache.
+     */
+    private val PLAY_DNS_HOSTS = PLAY_API_HOSTS + listOf("googleapis.cn")
+
+    /** Every Play host whose AAAA answer must not reach an IPv4-only egress. */
+    private val PLAY_IPV6_HOSTS = PLAY_DNS_HOSTS + PLAY_DOWNLOAD_HOSTS
 
     fun render(spec: RenderSpec): String = buildString(2048 + spec.nodes.size * 96) {
         val prepared = prepareNodes(spec.nodes)
@@ -145,6 +180,24 @@ object DaeConfigRenderer {
         append("  }\n")
         append("  routing {\n")
         append("    request {\n")
+        // Play's CDNs are classified differently by different geosite
+        // versions (and some, like the dashed punycode CDNs, are not CN at
+        // all). A plain `qtype(AAAA) && !qname(geosite:cn)` leaves AAAA for
+        // those names intact, so Play dials an IPv6 CDN through an IPv4-only
+        // node and every download dies at TLS setup. Reject Play AAAA before
+        // every other request rule.
+        if (dns.blockIpv6) {
+            append("      qtype(AAAA) && qname(")
+                .append(playHosts(PLAY_IPV6_HOSTS))
+                .append(") -> reject\n")
+        }
+        // Download hosts must win over qname(geosite:cn): services.googleapis.cn
+        // is classified as a CN site, but its domestic answer is the stalled
+        // GGC cache. Resolve it (and every other Play download host) abroad so
+        // the proxy dials a reachable global front end.
+        append("      qname(")
+            .append(playHosts(PLAY_DOWNLOAD_HOSTS))
+            .append(") -> googledns\n")
         if (dns.useDomesticForCn) {
             append("      qname(geosite:cn) -> alidns\n")
         }
@@ -167,10 +220,9 @@ object DaeConfigRenderer {
         // them through the foreign DoH adds a proxy round trip that times out
         // whenever the node is slow, and the resulting SERVFAIL breaks Play
         // itself; the domestic resolver answers these directly and correctly.
-        append(
-            "      qname(suffix: play.googleapis.com, suffix: googleapis.cn, " +
-                "suffix: services.googleapis.cn, suffix: gvt1.com, suffix: gvt2.com) -> alidns\n",
-        )
+        append("      qname(")
+            .append(playHosts(PLAY_DNS_HOSTS))
+            .append(") -> alidns\n")
         append("      fallback: googledns\n")
         append("    }\n")
         append("    response {\n")
@@ -181,6 +233,9 @@ object DaeConfigRenderer {
         append("  }\n")
         append("}\n\n")
     }
+
+    private fun playHosts(hosts: List<String>): String =
+        hosts.joinToString(", ") { "suffix: $it" }
 
     /** Hostnames of node servers; IP endpoints need no bootstrap lookup. */
     private fun nodeServerNames(nodes: List<Node>): List<String> =
@@ -360,6 +415,20 @@ object DaeConfigRenderer {
             }
         }
 
+        // A cached AAAA or an app dialing a hardcoded IPv6 address would
+        // otherwise be caught by a later Play/CN rule and sent to an IPv4-only
+        // node, where the relay fails with "network is unreachable". Block IPv6
+        // before custom rules and before the Play proxy rules. In bypass-mainland
+        // mode CN IPv6 still falls through to `dip(geoip:cn) -> direct` below;
+        // the other templates have no CN direct path, so they block all IPv6.
+        if (spec.dns.blockIpv6) {
+            if (spec.template == RoutingTemplate.BYPASS_MAINLAND) {
+                append("  ipversion(6) && !dip(geoip:cn) -> block\n")
+            } else {
+                append("  ipversion(6) -> block\n")
+            }
+        }
+
         for (rule in spec.customRules.filter { it.enabled }) {
             val expression = sanitizeRule(rule.expression) ?: continue
             val requested = rule.outbound.trim()
@@ -374,13 +443,13 @@ object DaeConfigRenderer {
 
         when (spec.template) {
             RoutingTemplate.BYPASS_MAINLAND -> {
-                // Play downloads are served by services.googleapis.cn, whose
-                // answers are China Mobile GGC cache IPs inside geoip:cn. That
-                // direct path stalls (0 B/s) on some carriers while the same
-                // cache answers normally through the proxy, so the download
-                // hosts have to win over the CN direct rules.
+                // Play's API and download hosts leave through the same proxy
+                // egress. The domestic download cache answers TCP but stalls
+                // at zero bytes, while the overseas answer is fetchable by the
+                // proxy; resolving and routing both here also keeps the
+                // delivery URL on one public address.
                 append("  domain(")
-                    .append(PLAY_DOWNLOAD_HOSTS.joinToString(", ") { "suffix: $it" })
+                    .append(playHosts(PLAY_API_HOSTS + PLAY_DOWNLOAD_HOSTS))
                     .append(") -> ").append(fallback).append('\n')
                 append("  domain(geosite:cn) -> direct\n")
                 append("  dip(geoip:cn) -> direct\n")
@@ -390,14 +459,6 @@ object DaeConfigRenderer {
                 // leftovers are direct, which is what fallback below does.
             }
             RoutingTemplate.GLOBAL, RoutingTemplate.DIRECT -> Unit
-        }
-
-        // The DNS layer already rejects AAAA for proxied names, but apps still
-        // dial cached/hardcoded IPv6 (e.g. Telegram). Without an IPv6 egress the
-        // proxy relay hangs on "network is unreachable"; block non-CN IPv6 here
-        // so it fails fast. CN IPv6 matched dip(geoip:cn) above stays direct.
-        if (spec.dns.blockIpv6) {
-            append("  ipversion(6) -> block\n")
         }
 
         append("  fallback: ").append(fallback).append('\n')

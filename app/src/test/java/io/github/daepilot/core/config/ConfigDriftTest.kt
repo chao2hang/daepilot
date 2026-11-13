@@ -33,4 +33,23 @@ class ConfigDriftTest {
     fun trailingWhitespaceIsIgnored() {
         assertFalse(ConfigDrift.differs(rendered + "\n", rendered))
     }
+
+    @Test
+    fun theResolvedLanInterfaceIsNotDrift() {
+        val desired = rendered.replace(
+            "wan_interface: auto",
+            "wan_interface: auto\n  lan_interface: auto",
+        )
+        val deployed = desired.replace("lan_interface: auto", "lan_interface: wlan2,usb0")
+        assertFalse(ConfigDrift.differs(desired, deployed))
+    }
+
+    @Test
+    fun aDroppedLanInterfaceIsNotDrift() {
+        val desired = rendered.replace(
+            "wan_interface: auto",
+            "wan_interface: auto\n  lan_interface: auto",
+        )
+        assertFalse(ConfigDrift.differs(desired, rendered))
+    }
 }

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -30,7 +31,9 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.MoreVert
@@ -64,11 +67,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
@@ -92,6 +100,8 @@ import io.github.daepilot.core.model.RoutingRule
 import io.github.daepilot.core.model.RoutingTemplate
 import io.github.daepilot.ui.AppViewModel
 import io.github.daepilot.ui.components.ConfirmDialog
+import io.github.daepilot.ui.components.DaeGlassRadius
+import io.github.daepilot.ui.components.GlassAction
 import io.github.daepilot.ui.components.RowDivider
 import io.github.daepilot.ui.components.ScreenBottom
 import io.github.daepilot.ui.components.ScreenEdge
@@ -107,25 +117,87 @@ private data class OutboundOption(
 
 private enum class DnsField { DOMESTIC, FOREIGN }
 
+/** Saves which upstream is open, so the editor sheet survives a tab switch. */
+private val DnsFieldSaver = Saver<DnsField?, String>(
+    save = { it?.name ?: "" },
+    restore = { if (it.isEmpty()) null else DnsField.valueOf(it) },
+)
+
+private val RuleDraftSaver = Saver<RuleDraft, List<String>>(
+    save = {
+        listOf(
+            it.kind.name,
+            it.domainMatch.name,
+            it.domain,
+            it.presetSource.name,
+            it.preset,
+            it.ip,
+            it.ports,
+            it.portFilter,
+            it.advanced,
+        )
+    },
+    restore = {
+        RuleDraft(
+            kind = RuleKind.valueOf(it[0]),
+            domainMatch = DomainMatch.valueOf(it[1]),
+            domain = it[2],
+            presetSource = PresetSource.valueOf(it[3]),
+            preset = it[4],
+            ip = it[5],
+            ports = it[6],
+            portFilter = it[7],
+            advanced = it[8],
+        )
+    },
+)
+
+private val UpstreamDraftSaver = Saver<UpstreamDraft, List<String>>(
+    save = {
+        listOf(
+            it.protocol.name,
+            it.host,
+            it.port,
+            it.path,
+            it.raw,
+            if (it.advanced) "1" else "0",
+        )
+    },
+    restore = {
+        UpstreamDraft(
+            protocol = UpstreamProtocol.valueOf(it[0]),
+            host = it[1],
+            port = it[2],
+            path = it[3],
+            raw = it[4],
+            advanced = it[5] == "1",
+        )
+    },
+)
+
 @Composable
 fun RoutingScreen(
     viewModel: AppViewModel,
     snapshot: AppSnapshot,
     busy: Boolean,
 ) {
-    var showPreview by remember { mutableStateOf(false) }
+    var showPreview by rememberSaveable { mutableStateOf(false) }
     var previewText by remember { mutableStateOf<String?>(null) }
-    var ruleEditor by remember { mutableStateOf<RoutingRule?>(null) }
-    var showRuleEditor by remember { mutableStateOf(false) }
+    // Only the edited rule's id is persisted; the draft inside the sheet saves itself.
+    var ruleEditorId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showRuleEditor by rememberSaveable { mutableStateOf(false) }
     var showGroupEditor by remember { mutableStateOf(false) }
     var editingGroup by remember { mutableStateOf<OutboundGroup?>(null) }
     var deleteRule by remember { mutableStateOf<RoutingRule?>(null) }
     var deleteGroup by remember { mutableStateOf<OutboundGroup?>(null) }
-    var domesticDns by remember(snapshot.dns) { mutableStateOf(snapshot.dns.domesticUpstream) }
-    var foreignDns by remember(snapshot.dns) { mutableStateOf(snapshot.dns.foreignUpstream) }
-    var useDomestic by remember(snapshot.dns) { mutableStateOf(snapshot.dns.useDomesticForCn) }
-    var blockIpv6 by remember(snapshot.dns) { mutableStateOf(snapshot.dns.blockIpv6) }
-    var dnsEditor by remember { mutableStateOf<DnsField?>(null) }
+    var domesticDns by rememberSaveable(snapshot.dns) { mutableStateOf(snapshot.dns.domesticUpstream) }
+    var foreignDns by rememberSaveable(snapshot.dns) { mutableStateOf(snapshot.dns.foreignUpstream) }
+    var useDomestic by rememberSaveable(snapshot.dns) { mutableStateOf(snapshot.dns.useDomesticForCn) }
+    var blockIpv6 by rememberSaveable(snapshot.dns) { mutableStateOf(snapshot.dns.blockIpv6) }
+    var dnsEditor by rememberSaveable(stateSaver = DnsFieldSaver) {
+        mutableStateOf<DnsField?>(null)
+    }
+    val ruleEditor = ruleEditorId?.let { id -> snapshot.rules.firstOrNull { it.id == id } }
     val dnsDirty = domesticDns != snapshot.dns.domesticUpstream ||
         foreignDns != snapshot.dns.foreignUpstream ||
         useDomestic != snapshot.dns.useDomesticForCn ||
@@ -187,6 +259,39 @@ fun RoutingScreen(
         }
 
         item {
+            // Primary flows sit above the fold so none of them starts with a scroll.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                GlassAction(
+                    icon = Icons.Outlined.Add,
+                    label = "添加规则",
+                    onClick = {
+                        ruleEditorId = null
+                        showRuleEditor = true
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                GlassAction(
+                    icon = Icons.Outlined.Dns,
+                    label = "DNS 上游",
+                    onClick = { dnsEditor = DnsField.DOMESTIC },
+                    modifier = Modifier.weight(1f),
+                )
+                GlassAction(
+                    icon = Icons.Outlined.Layers,
+                    label = "出口分组",
+                    onClick = {
+                        editingGroup = null
+                        showGroupEditor = true
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        item {
             SectionCard(title = "分流模板") {
                 RoutingTemplate.entries.forEachIndexed { index, template ->
                     if (index > 0) RowDivider()
@@ -204,7 +309,7 @@ fun RoutingScreen(
                 title = "自定义规则",
                 action = {
                     IconButton(onClick = {
-                        ruleEditor = null
+                        ruleEditorId = null
                         showRuleEditor = true
                     }) {
                         Icon(Icons.Outlined.Add, contentDescription = "添加规则")
@@ -226,7 +331,7 @@ fun RoutingScreen(
                         )
                         OutlinedButton(
                             onClick = {
-                                ruleEditor = null
+                                ruleEditorId = null
                                 showRuleEditor = true
                             },
                             shape = MaterialTheme.shapes.small,
@@ -249,7 +354,7 @@ fun RoutingScreen(
                         onMoveDown = { viewModel.moveRule(rule.id, 1) },
                         onDuplicate = { viewModel.duplicateRule(rule.id) },
                         onEdit = {
-                            ruleEditor = rule
+                            ruleEditorId = rule.id
                             showRuleEditor = true
                         },
                         onDelete = { deleteRule = rule },
@@ -311,24 +416,17 @@ fun RoutingScreen(
                     uri = foreignDns,
                     onClick = { dnsEditor = DnsField.FOREIGN },
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("大陆域名使用国内 DNS", style = MaterialTheme.typography.bodyMedium)
-
-                    }
-                    Switch(checked = useDomestic, onCheckedChange = { useDomestic = it })
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("阻止海外 IPv6", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            "避免 IPv4-only 节点卡在 AAAA 查询，推荐开启",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(checked = blockIpv6, onCheckedChange = { blockIpv6 = it })
-                }
+                DnsSwitchRow(
+                    title = "大陆域名使用国内 DNS",
+                    checked = useDomestic,
+                    onCheckedChange = { useDomestic = it },
+                )
+                DnsSwitchRow(
+                    title = "阻止海外 IPv6",
+                    description = "避免 IPv4-only 节点卡在 AAAA 查询，推荐开启",
+                    checked = blockIpv6,
+                    onCheckedChange = { blockIpv6 = it },
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
@@ -399,12 +497,12 @@ fun RoutingScreen(
             targets = outboundOptions,
             onDismiss = {
                 showRuleEditor = false
-                ruleEditor = null
+                ruleEditorId = null
             },
             onSave = { expression, outbound ->
                 viewModel.saveRule(expression, outbound, ruleEditor?.id)
                 showRuleEditor = false
-                ruleEditor = null
+                ruleEditorId = null
             },
         )
     }
@@ -629,8 +727,10 @@ private fun RuleEditorSheet(
     onDismiss: () -> Unit,
     onSave: (String, String) -> Unit,
 ) {
-    var draft by remember(existing) { mutableStateOf(initialRuleDraft(existing)) }
-    var outbound by remember(existing) {
+    var draft by rememberSaveable(existing, stateSaver = RuleDraftSaver) {
+        mutableStateOf(initialRuleDraft(existing))
+    }
+    var outbound by rememberSaveable(existing) {
         mutableStateOf(
             existing?.outbound?.takeIf { value ->
                 targets.any { it.value == value }
@@ -665,7 +765,7 @@ private fun RuleEditorSheet(
         sheetState = sheetState,
         containerColor = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        shape = RoundedCornerShape(topStart = DaeGlassRadius, topEnd = DaeGlassRadius),
         dragHandle = {
             BottomSheetDefaults.DragHandle(
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
@@ -736,7 +836,11 @@ private fun RuleEditorSheet(
                     shape = MaterialTheme.shapes.small,
                 ) {
                     Text(selectedLabel, modifier = Modifier.weight(1f))
-                    Text("▾")
+                    Icon(
+                        Icons.Outlined.ExpandMore,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 DropdownMenu(expanded = targetMenu, onDismissRequest = { targetMenu = false }) {
                     var section: String? = null
@@ -1060,6 +1164,41 @@ private fun RulePreview(built: RuleBuild, error: String?, outbound: String) {
     }
 }
 
+/** Switch row that toggles from anywhere, with one merged switch for TalkBack. */
+@Composable
+private fun DnsSwitchRow(
+    title: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    description: String? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
+            .heightIn(min = 48.dp)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            if (description != null) {
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(
+            checked = checked,
+            onCheckedChange = null,
+            modifier = Modifier.semantics { contentDescription = title },
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DnsUpstreamRow(title: String, uri: String, onClick: () -> Unit) {
@@ -1114,7 +1253,9 @@ private fun DnsUpstreamSheet(
     onDismiss: () -> Unit,
     onSave: (String) -> Unit,
 ) {
-    var draft by remember { mutableStateOf(DnsUpstreamBuilder.parse(current)) }
+    var draft by rememberSaveable(stateSaver = UpstreamDraftSaver) {
+        mutableStateOf(DnsUpstreamBuilder.parse(current))
+    }
     var error by remember { mutableStateOf<String?>(null) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val built = remember(draft) { DnsUpstreamBuilder.build(draft) }
@@ -1131,7 +1272,7 @@ private fun DnsUpstreamSheet(
         sheetState = sheetState,
         containerColor = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        shape = RoundedCornerShape(topStart = DaeGlassRadius, topEnd = DaeGlassRadius),
         dragHandle = {
             BottomSheetDefaults.DragHandle(
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
@@ -1331,6 +1472,9 @@ private fun DnsUpstreamSheet(
 @Composable
 private fun ConfigPreviewDialog(config: String, onDismiss: () -> Unit) {
     val clipboard = LocalClipboardManager.current
+    // No snackbar route is exposed by the viewModel for a plain copy, so the button
+    // itself carries the acknowledgement until the dialog closes.
+    var copied by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("config.dae") },
@@ -1345,8 +1489,11 @@ private fun ConfigPreviewDialog(config: String, onDismiss: () -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(onClick = { clipboard.setText(AnnotatedString(config)) }) {
-                Text("复制")
+            TextButton(onClick = {
+                clipboard.setText(AnnotatedString(config))
+                copied = true
+            }) {
+                Text(if (copied) "已复制到剪贴板" else "复制")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },

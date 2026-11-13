@@ -25,7 +25,7 @@ val DaePilotTypography = Typography(
         fontWeight = FontWeight.SemiBold,
         fontSize = 28.sp,
         lineHeight = 34.sp,
-        letterSpacing = (-0.4).sp,
+        letterSpacing = (-0.5).sp,
     ),
     headlineSmall = TextStyle(
         fontFamily = FontFamily.Default,
@@ -36,10 +36,10 @@ val DaePilotTypography = Typography(
     ),
     titleLarge = TextStyle(
         fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 19.sp,
-        lineHeight = 25.sp,
-        letterSpacing = (-0.1).sp,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 20.sp,
+        lineHeight = 26.sp,
+        letterSpacing = (-0.2).sp,
     ),
     titleMedium = TextStyle(
         fontFamily = FontFamily.Default,
@@ -94,7 +94,7 @@ val DaePilotTypography = Typography(
 val DaePilotShapes = Shapes(
     extraSmall = RoundedCornerShape(8.dp),
     small = RoundedCornerShape(12.dp),
-    medium = RoundedCornerShape(18.dp),
-    large = RoundedCornerShape(24.dp),
-    extraLarge = RoundedCornerShape(30.dp),
+    medium = RoundedCornerShape(20.dp),
+    large = RoundedCornerShape(28.dp),
+    extraLarge = RoundedCornerShape(32.dp),
 )
