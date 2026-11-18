@@ -1000,19 +1000,17 @@ out="$(run_ctl apply "$BASE/staging/config.dae")"; rc=$?
 assert_eq "$rc" "0" "warmup: apply config succeeds"
 out="$(run_ctl start)"; rc=$?
 assert_eq "$rc" "0" "warmup: start succeeds"
-# The probe runs detached because it may block for seconds on a slow node;
-# start must return first, then the probe must still happen.
-i=0
-while [ "$i" -lt 50 ] && ! grep -q 'generate_204' "$WORK/curl.log" 2>/dev/null; do
-  sleep 0.1
-  i=$((i + 1))
-done
+# One short probe runs inline so the first DNS wave meets a live session; the
+# start deadline still bounds it (curl -m 3), and a detached retry covers a
+# slow handshake.
 assert_contains "$WORK/curl.log" "https://www.google.com/generate_204" \
-  "warmup: start probes the proxy path in the background"
+  "warmup: start probes the proxy path"
 case "$out" in
-  *"proxy path warmed up"*) fail_test "warmup: start must not wait for the probe" ;;
-  *) pass "warmup: start returns before the probe finishes" ;;
+  *"proxy path warmed up"*) pass "warmup: inline probe reports a warm path" ;;
+  *) fail_test "warmup: inline probe reports a warm path" ;;
 esac
+assert_eq "$(grep -c 'generate_204' "$WORK/curl.log" 2>/dev/null)" "1" \
+  "warmup: warm path skips the background retry"
 run_ctl stop >/dev/null 2>&1
 
 setup_base "$CTL_SRC"
@@ -1026,12 +1024,12 @@ assert_eq "$rc" "0" "warmup: a dead node does not block boot"
 i=0
 while [ "$i" -lt 80 ]; do
   curl_calls="$(grep -c 'generate_204' "$WORK/curl.log" 2>/dev/null)"
-  [ "$curl_calls" -ge 2 ] && break
+  [ "$curl_calls" -ge 3 ] && break
   sleep 0.1
   i=$((i + 1))
 done
 curl_calls="$(grep -c 'generate_204' "$WORK/curl.log" 2>/dev/null)"
-assert_eq "$curl_calls" "2" "warmup: retries are bounded to two attempts"
+assert_eq "$curl_calls" "3" "warmup: one inline probe plus two background attempts"
 out="$(run_ctl __warmup)"
 FAKE_CURL_FAIL=""
 case "$out" in
@@ -1167,6 +1165,20 @@ assert_eq "$(head -n 1 "$BASE/run/lan.hook")" "failed" "lan: hook state records 
 run_ctl status > "$WORK/status.out"
 assert_contains "$WORK/status.out" "running=1" "lan: daemon is up after degrading"
 assert_contains "$WORK/status.out" "lan_hook=failed" "lan: status reports the degraded hook"
+# A dead AP crashes every LAN-capable launch, so the failed interface set is
+# skipped for 10 minutes; a restart must not pay the two failed launches again.
+run_ctl stop >/dev/null 2>&1
+out="$(run_ctl start)"; rc=$?
+assert_eq "$rc" "0" "lan: start during cooldown succeeds"
+case "$out" in
+  *"热点接口"*) fail_test "lan: cooldown skips the failing interface (bind retried)" ;;
+  *) pass "lan: cooldown skips the failing interface" ;;
+esac
+assert_not_contains "$BASE/rootfs/config/config.dae" "lan_interface" \
+  "lan: cooldown keeps the LAN line out of the staged config"
+assert_file_present "$BASE/run/lan.failed" "lan: failure marker survives the restart"
+run_ctl status > "$WORK/status.out"
+assert_contains "$WORK/status.out" "lan_hook=failed" "lan: cooldown still reports the failure"
 FAIL_LAN=""
 run_ctl stop >/dev/null 2>&1
 FAKE_AP=""

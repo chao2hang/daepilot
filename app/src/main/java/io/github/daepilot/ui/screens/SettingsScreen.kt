@@ -109,6 +109,7 @@ fun SettingsScreen(
     var showAccentSheet by remember { mutableStateOf(false) }
     val rootState by viewModel.rootState.collectAsStateWithLifecycle()
     val upload by viewModel.logUpload.collectAsStateWithLifecycle()
+    val alerts by viewModel.logAlerts.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -406,6 +407,7 @@ fun SettingsScreen(
             loading = false,
             onRun = viewModel::diagnose,
             onDismiss = { showDiagnostics = false },
+            alerts = alerts,
         )
     }
 

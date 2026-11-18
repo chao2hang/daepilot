@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import io.github.daepilot.core.log.LogAlerts
 import io.github.daepilot.core.model.CompatibilityReport
 import io.github.daepilot.core.model.DaemonStatus
 import io.github.daepilot.ui.theme.LocalDaeGlassPalette
@@ -40,6 +41,7 @@ fun DiagnosticsDialog(
     loading: Boolean,
     onRun: () -> Unit,
     onDismiss: () -> Unit,
+    alerts: LogAlerts? = null,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -55,7 +57,7 @@ fun DiagnosticsDialog(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     if (status != null) {
-                        NetworkSection(status)
+                        NetworkSection(status, alerts)
                         HorizontalDivider()
                         Text("兼容性", style = MaterialTheme.typography.titleSmall)
                     }
@@ -162,7 +164,7 @@ fun DiagnosticsDialog(
 }
 
 @Composable
-private fun NetworkSection(status: DaemonStatus) {
+private fun NetworkSection(status: DaemonStatus, alerts: LogAlerts?) {
     Text("网络", style = MaterialTheme.typography.titleSmall)
     val iface = listOfNotNull(
         status.wan?.takeIf { it.isNotBlank() },
@@ -192,6 +194,18 @@ private fun NetworkSection(status: DaemonStatus) {
         if (status.ipv6Mode == "blocked") "已阻止（节点 IPv4）" else "允许",
     )
     NetworkRow("节点", status.node?.takeIf { it.isNotBlank() } ?: "—")
+    alerts?.certificateFailures?.takeIf { it > 0 }?.let { count ->
+        NetworkRow("节点证书", "$count 次校验失败，检查节点证书链", error = true)
+    }
+    status.restarts?.takeIf { it > 0 }?.let { count ->
+        NetworkRow(
+            "自动重启",
+            listOfNotNull(
+                "$count 次",
+                status.lastRestart?.takeIf { it.isNotBlank() },
+            ).joinToString(" · "),
+        )
+    }
     status.bypassUidCount?.let { count ->
         NetworkRow("应用绕过", "$count 个应用已标记")
     }

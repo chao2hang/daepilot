@@ -229,6 +229,10 @@ data class DaemonStatus(
     val lanClients: Int? = null,
     /** "ok" | "failed" | "absent": whether the LAN hooks actually attached. */
     val lanHook: String? = null,
+    /** Watchdog-initiated restarts since the module was installed. */
+    val restarts: Int? = null,
+    /** Last restart as "yyyy-MM-dd HH:mm:ss reason". */
+    val lastRestart: String? = null,
 )
 
 @Serializable

@@ -76,6 +76,8 @@ class DaemonController(
             lan = values["lan"]?.takeIf { it.isNotBlank() },
             lanClients = values["lan_clients"]?.toIntOrNull(),
             lanHook = values["lan_hook"]?.takeIf { it.isNotBlank() },
+            restarts = values["restarts"]?.toIntOrNull(),
+            lastRestart = values["last_restart"]?.takeIf { it.isNotBlank() },
         )
     }
 
@@ -282,21 +284,32 @@ class DaemonController(
 
     private fun activeDnsServers(): List<String> {
         val manager = context.getSystemService(ConnectivityManager::class.java) ?: return emptyList()
-        val networks = LinkedHashSet<Network>()
-        manager.activeNetwork?.let(networks::add)
-        networks.addAll(manager.allNetworks)
+        // Only the active network's resolvers are reachable. Mixing in a
+        // dormant Wi-Fi or a disabled SIM's carriers produced dead entries in
+        // the chroot resolv.conf and extra upstream timeouts at cold start.
+        val active = manager.activeNetwork?.let { dnsServersOf(manager, it) }.orEmpty()
+        if (active.isNotEmpty()) return active
+        // Android occasionally exposes an active network without DNS (VPN
+        // handoff); fall back to the union so dae still gets a bootstrap.
         val servers = LinkedHashSet<String>()
-        for (network in networks) {
-            val properties = manager.getLinkProperties(network) ?: continue
-            for (address in properties.dnsServers) {
-                val host = address.hostAddress?.substringBefore('%') ?: continue
-                if (host.isEmpty() || host == "::1" || host == "0.0.0.0") continue
-                if (host.startsWith("127.") || host.startsWith("169.254.")) continue
-                if (host.startsWith("fe80:", ignoreCase = true)) continue
-                servers.add(host)
+        for (network in manager.allNetworks) servers.addAll(dnsServersOf(manager, network))
+        return servers.toList()
+    }
+
+    private fun dnsServersOf(
+        manager: ConnectivityManager,
+        network: Network,
+    ): List<String> {
+        val properties = manager.getLinkProperties(network) ?: return emptyList()
+        return properties.dnsServers.mapNotNull { address ->
+            val host = address.hostAddress?.substringBefore('%') ?: return@mapNotNull null
+            when {
+                host.isEmpty() || host == "::1" || host == "0.0.0.0" -> null
+                host.startsWith("127.") || host.startsWith("169.254.") -> null
+                host.startsWith("fe80:", ignoreCase = true) -> null
+                else -> host
             }
         }
-        return servers.toList()
     }
 
     private fun parsePackageUids(output: String): Map<String, Int> {

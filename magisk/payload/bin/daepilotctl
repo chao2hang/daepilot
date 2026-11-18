@@ -49,8 +49,11 @@ BYPASS_CHAIN="daepilot_bypass"
 LAN_FILE="$RUN/lan.interfaces"
 LAN_AUTO="$RUN/lan.auto"
 LAN_HOOK_STATE="$RUN/lan.hook"
+LAN_FAIL="$RUN/lan.failed"
 LAN_CANDIDATE="$RUN/lan.candidate"
 LAN_CANDIDATE_COUNT="$RUN/lan.candidate.count"
+RESTARTS="$RUN/restarts"
+LAST_RESTART="$RUN/last_restart"
 # Keep in sync with DaeConfigRenderer.BYPASS_DSCP (0x2f). The TOS fallback
 # writes the same DSCP field (0x2f << 2 = 0xbc) on kernels without xt_DSCP.
 BYPASS_DSCP="0x2f"
@@ -488,6 +491,8 @@ normalize_lan_config() {
   file="$1"
   grep -qE '^[[:space:]]*lan_interface:[[:space:]]*auto[[:space:]]*$' "$file" 2>/dev/null || return 0
   lan="$(detect_lan_interfaces 2>/dev/null)"
+  # Do not re-add an interface set that already crashed dae twice.
+  [ -n "$lan" ] && lan_fail_active && lan=""
   tmp="$file.lan.$$"
   if [ -n "$lan" ]; then
     sed "s/^\([[:space:]]*lan_interface:\).*/\1 $lan/" "$file" > "$tmp" 2>/dev/null \
@@ -513,6 +518,49 @@ strip_lan_config() {
   else
     rm -f "$tmp" 2>/dev/null
   fi
+}
+
+# A dead AP crashes every LAN-capable launch: dae creates its tproxy listener
+# and only then fails the TCX attach, so each retry costs two full restarts and
+# the phone loses its proxy for ~10 s. Remember the interface set that failed
+# and skip binding it for 10 minutes. A different set (or a reused hotspot that
+# came up on another interface) clears the marker immediately.
+LAN_FAIL_COOLDOWN=600
+lan_fail_active() {
+  local ts ifaces now current
+  [ -s "$LAN_FAIL" ] || return 1
+  read -r ts ifaces < "$LAN_FAIL" 2>/dev/null
+  case "$ts" in ''|*[!0-9]*) rm -f "$LAN_FAIL" 2>/dev/null; return 1 ;; esac
+  now="$(date +%s 2>/dev/null)"
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  if [ $((now - ts)) -ge "$LAN_FAIL_COOLDOWN" ]; then
+    rm -f "$LAN_FAIL" 2>/dev/null
+    return 1
+  fi
+  current="$(detect_lan_interfaces 2>/dev/null)"
+  if [ "$current" != "$ifaces" ]; then
+    rm -f "$LAN_FAIL" 2>/dev/null
+    return 1
+  fi
+  return 0
+}
+
+mark_lan_failed() {
+  [ -n "$1" ] || return 0
+  mkdir -p "$RUN" 2>/dev/null
+  printf '%s %s\n' "$(date +%s 2>/dev/null)" "$1" > "$LAN_FAIL" 2>/dev/null
+}
+
+clear_lan_failed() { rm -f "$LAN_FAIL" 2>/dev/null; }
+
+# Restart counters for diagnostics. Only the watchdog writes these: a manual
+# start is not a restart, and the app already records its own actions.
+note_restart() {
+  local n=0
+  [ -s "$RESTARTS" ] && read -r n < "$RESTARTS" 2>/dev/null
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s\n' "$((n + 1))" > "$RESTARTS" 2>/dev/null
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" > "$LAST_RESTART" 2>/dev/null
 }
 
 # The saved config contains the concrete WAN from the last apply. Android can
@@ -763,10 +811,47 @@ write_node_hosts() {
   fi
 }
 
+# dae runs inside the chroot, where Android's packed tzdata (not zoneinfo
+# files) is invisible to Go, so it would log UTC. Write a minimal TZif v1 with
+# the current offset; DST/travel changes apply on the next restart.
+write_chroot_localtime() {
+  local z sign hh mm off o1 o2 o3 o4 tmp
+  z="$(date +%z 2>/dev/null)"
+  case "$z" in
+    [+-][0-9][0-9][0-9][0-9]) ;;
+    *) rm -f "$ROOTFS/etc/localtime" 2>/dev/null; return 0 ;;
+  esac
+  sign="${z%"${z#?}"}"
+  hh="${z#?}"; hh="${hh%??}"
+  mm="${z#????}"
+  hh="${hh#0}"; [ -n "$hh" ] || hh=0
+  mm="${mm#0}"; [ -n "$mm" ] || mm=0
+  off=$((hh * 3600 + mm * 60))
+  [ "$sign" = "-" ] && off=$((-off))
+  o1=$(( (off >> 24) & 255 ))
+  o2=$(( (off >> 16) & 255 ))
+  o3=$(( (off >> 8) & 255 ))
+  o4=$(( off & 255 ))
+  mkdir -p "$ROOTFS/etc" 2>/dev/null
+  tmp="$ROOTFS/etc/localtime.$$"
+  {
+    printf 'TZif\000'
+    head -c 31 /dev/zero
+    printf '\000\000\000\001'
+    printf '\000\000\000\004'
+    printf "\\$(printf '%03o' "$o1")\\$(printf '%03o' "$o2")\\$(printf '%03o' "$o3")\\$(printf '%03o' "$o4")"
+    printf '\000\000LOC\000'
+  } > "$tmp" 2>/dev/null \
+    && mv "$tmp" "$ROOTFS/etc/localtime" 2>/dev/null \
+    && chmod 644 "$ROOTFS/etc/localtime" 2>/dev/null \
+    || rm -f "$tmp" 2>/dev/null
+}
+
 prepare_chroot() {
   ensure_layout
   write_resolv
   write_ca_bundle
+  write_chroot_localtime
   # Keep the static binary inside the chroot; dae is not dynamically linked,
   # but this also makes the path stable for `dae validate` and `dae reload`.
   if [ -x "$DAE" ]; then
@@ -810,19 +895,31 @@ record_wan_binding() {
 
 # Same record for the LAN side. Unlike the WAN, "auto" is only ever resolved in
 # the staged copy, so $CONF keeps the app's intent and no heal logic is needed.
+# During a cooldown the staged config intentionally has no LAN line; keep the
+# detected interfaces in LAN_FILE so the watchdog sees no difference and the
+# status card can still explain why sharing is off.
 record_lan_binding() {
-  local lan auto
+  local lan auto detected
   auto="${1:-}"
   lan="$(sed -n 's/^[[:space:]]*lan_interface:[[:space:]]*\([^[:space:]]*\).*/\1/p' \
     "$ROOTFS/config/config.dae" 2>/dev/null | head -n 1)"
   if [ -n "$lan" ] && [ "$lan" != "auto" ]; then
     printf '%s\n' "$lan" > "$LAN_FILE" 2>/dev/null
   else
-    rm -f "$LAN_FILE" "$LAN_HOOK_STATE" 2>/dev/null
+    detected=""
+    if [ "$auto" = "1" ] && lan_fail_active; then
+      detected="$(detect_lan_interfaces 2>/dev/null)"
+    fi
+    if [ -n "$detected" ]; then
+      printf '%s\n' "$detected" > "$LAN_FILE" 2>/dev/null
+      echo failed > "$LAN_HOOK_STATE" 2>/dev/null
+    else
+      rm -f "$LAN_FILE" "$LAN_HOOK_STATE" 2>/dev/null
+    fi
   fi
   case "$auto" in
     1) : > "$LAN_AUTO" 2>/dev/null ;;
-    0) rm -f "$LAN_AUTO" "$LAN_HOOK_STATE" 2>/dev/null ;;
+    0) rm -f "$LAN_AUTO" "$LAN_HOOK_STATE" "$LAN_FAIL" 2>/dev/null ;;
   esac
   rm -f "$LAN_CANDIDATE" "$LAN_CANDIDATE_COUNT" 2>/dev/null
 }
@@ -1172,6 +1269,25 @@ warmup_proxy() {
   return 0
 }
 
+# One short inline attempt so the first DNS wave meets an established QUIC
+# session, without the old 18 s worst case. The async retry below still covers
+# a slow handshake.
+warmup_proxy_quick() {
+  have curl || return 0
+  is_running || return 0
+  [ -n "$(proxy_node_hosts "$ROOTFS/config/config.dae" 2>/dev/null)" ] || return 0
+  if curl -m 3 -s -o /dev/null https://www.google.com/generate_204 2>/dev/null; then
+    say "proxy path warmed up"
+    return 0
+  fi
+  return 1
+}
+
+warmup_after_start() {
+  warmup_proxy_quick && return 0
+  warmup_proxy_async
+}
+
 # The warmup used to run inline, adding up to 18 s to a start against a dead
 # node. Run it detached instead: the start path only needs dae to be alive.
 warmup_proxy_async() {
@@ -1208,11 +1324,11 @@ launch_dae_process() {
   case "$log_mark" in ''|*[!0-9]*) log_mark=0 ;; esac
   printf '\n=== %s start ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG"
   if [ -n "$BB" ]; then
-    "$BB" setsid "$BB" unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp 9>&- >> "$LOG" 2>&1 &
+    "$BB" setsid "$BB" unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo 9>&- >> "$LOG" 2>&1 &
   elif have setsid; then
-    setsid unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp 9>&- >> "$LOG" 2>&1 &
+    setsid unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo 9>&- >> "$LOG" 2>&1 &
   else
-    unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo --disable-timestamp 9>&- >> "$LOG" 2>&1 &
+    unshare -m "$CTL" __run_in_ns /bin/dae run -c /config/config.dae --disable-sudo 9>&- >> "$LOG" 2>&1 &
   fi
   launched=$!
   echo "$launched" > "$HOST_PID"
@@ -1318,7 +1434,12 @@ start_daemon() {
   # Android switches networks (Wi-Fi <-> cellular) and the interface changes.
   record_wan_binding "$wan_auto"
   record_lan_binding "$lan_auto"
-  lan_bound="$(head -n 1 "$LAN_FILE" 2>/dev/null)"
+  lan_bound=""
+  # During a LAN cooldown the staged config has no LAN line even though
+  # LAN_FILE still names the detected interfaces; do not treat that as bound.
+  if grep -qE '^[[:space:]]*lan_interface:' "$ROOTFS/config/config.dae" 2>/dev/null; then
+    lan_bound="$(head -n 1 "$LAN_FILE" 2>/dev/null)"
+  fi
   # netd installs the tethering offload filters whenever sharing is configured;
   # they must be gone before dae attaches its LAN hook.
   prepare_lan_hooks
@@ -1334,9 +1455,12 @@ start_daemon() {
   say "starting dae (chroot $ROOTFS)"
   if launch_dae_process && ! lan_attach_failed; then
     clear_error
-    [ -n "$lan_bound" ] && echo ok > "$LAN_HOOK_STATE" 2>/dev/null
+    if [ -n "$lan_bound" ]; then
+      echo ok > "$LAN_HOOK_STATE" 2>/dev/null
+      clear_lan_failed
+    fi
     say "running (pid $pid)"
-    warmup_proxy_async
+    warmup_after_start
     return 0
   fi
 
@@ -1350,19 +1474,21 @@ start_daemon() {
     if launch_dae_process && ! lan_attach_failed; then
       clear_error
       echo ok > "$LAN_HOOK_STATE" 2>/dev/null
+      clear_lan_failed
       say "running (pid $pid)"
-      warmup_proxy_async
+      warmup_after_start
       return 0
     fi
     relaunch_prep
+    mark_lan_failed "$lan_bound"
     strip_lan_config "$ROOTFS/config/config.dae"
     lan_bound=""
     echo failed > "$LAN_HOOK_STATE" 2>/dev/null
-    say "热点接口仍无法绑定，降级为仅本机代理（热点共享不可用）"
+    say "热点接口仍无法绑定，降级为仅本机代理（10 分钟内不再重试热点，热点共享不可用）"
     if launch_dae_process; then
       clear_error
       say "running (pid $pid，热点共享不可用)"
-      warmup_proxy_async
+      warmup_after_start
       return 0
     fi
   fi
@@ -1484,9 +1610,11 @@ do_reload() {
   if [ -n "$lan_bound" ]; then
     if lan_attach_failed; then
       echo failed > "$LAN_HOOK_STATE" 2>/dev/null
+      mark_lan_failed "$lan_bound"
       say "热点接口绑定失败，本机代理不受影响"
     else
       echo ok > "$LAN_HOOK_STATE" 2>/dev/null
+      clear_lan_failed
     fi
   fi
   return 0
@@ -1577,6 +1705,20 @@ stop_watchdog() {
   rm -f "$WATCH_PID" 2>/dev/null
 }
 
+# A Wi-Fi deauth or roam briefly hands the default route to cellular. Restarting
+# on that transients burned 24 restarts in one day, so require 60 s (4 checks)
+# before leaving an enabled Wi-Fi link. Every other transition keeps the old
+# two-check debounce: a real Wi-Fi outage must fail over quickly.
+wan_restart_threshold() {
+  local current bound wifi
+  current="$1"
+  bound="$(head -n 1 "$WAN_FILE" 2>/dev/null)"
+  case "$bound" in wlan[0-9]*) ;; *) printf '%s\n' 2; return ;; esac
+  case "$current" in rmnet*|clat*|ccmni*|pdp*|wwan*) ;; *) printf '%s\n' 2; return ;; esac
+  wifi="$(settings get global wifi_on 2>/dev/null)"
+  if [ "$wifi" = "1" ]; then printf '%s\n' 4; else printf '%s\n' 2; fi
+}
+
 watch_loop() {
   mkdir -p "$RUN" 2>/dev/null
   # mkdir is atomic and works across mount namespaces, unlike the pid file plus
@@ -1622,7 +1764,12 @@ EOF
   say "watchdog $$ started"
   while [ -f "$ENABLED" ]; do
     if ! is_running; then
+      # `stop` clears ENABLED before taking the lock; without this check a
+      # restart already in flight would bring the daemon back after the user
+      # disabled it.
+      [ -f "$ENABLED" ] || break
       rotate_watch_log
+      note_restart "daemon down"
       say "[$(date '+%Y-%m-%d %H:%M:%S')] daemon down, restarting"
       start_daemon >> "$WLOG" 2>&1
     else
@@ -1646,9 +1793,13 @@ EOF
         fi
         printf '%s\n' "$candidate" > "$WAN_CANDIDATE" 2>/dev/null
         printf '%s\n' "$candidate_count" > "$WAN_CANDIDATE_COUNT" 2>/dev/null
-        if [ "$candidate_count" -ge 2 ]; then
+        wan_threshold="$(wan_restart_threshold "$current_wan")"
+        case "$wan_threshold" in ''|*[!0-9]*) wan_threshold=2 ;; esac
+        if [ "$candidate_count" -ge "$wan_threshold" ]; then
+          [ -f "$ENABLED" ] || break
           rotate_watch_log
-          say "[$(date '+%Y-%m-%d %H:%M:%S')] WAN changed ($bound_wan -> $current_wan), restarting"
+          note_restart "wan changed: $bound_wan -> $current_wan"
+          say "[$(date '+%Y-%m-%d %H:%M:%S')] WAN changed ($bound_wan -> $current_wan, ${candidate_count}x), restarting"
           rm -f "$WAN_CANDIDATE" "$WAN_CANDIDATE_COUNT" 2>/dev/null
           stop_daemon
           start_daemon >> "$WLOG" 2>&1
@@ -1667,7 +1818,16 @@ EOF
       if [ -f "$LAN_AUTO" ] && is_running; then
         current_lan="$(detect_lan_interfaces 2>/dev/null)"
         bound_lan="$(head -n 1 "$LAN_FILE" 2>/dev/null)"
-        if [ "$current_lan" != "$bound_lan" ]; then
+        lan_state=""
+        [ -f "$LAN_HOOK_STATE" ] && read -r lan_state < "$LAN_HOOK_STATE" 2>/dev/null
+        # After a degrade the staged config has no LAN line, so the interface
+        # set no longer "changes"; retry it once the cooldown expires.
+        lan_retry=0
+        if [ "$current_lan" = "$bound_lan" ] && [ "$lan_state" = "failed" ] \
+            && [ -n "$current_lan" ] && ! lan_fail_active; then
+          lan_retry=1
+        fi
+        if [ "$current_lan" != "$bound_lan" ] || [ "$lan_retry" = "1" ]; then
           lan_candidate="$(head -n 1 "$LAN_CANDIDATE" 2>/dev/null)"
           lan_count="$(head -n 1 "$LAN_CANDIDATE_COUNT" 2>/dev/null)"
           case "$lan_count" in ''|*[!0-9]*) lan_count=0 ;; esac
@@ -1680,8 +1840,15 @@ EOF
           printf '%s\n' "$lan_candidate" > "$LAN_CANDIDATE" 2>/dev/null
           printf '%s\n' "$lan_count" > "$LAN_CANDIDATE_COUNT" 2>/dev/null
           if [ "$lan_count" -ge 2 ]; then
+            [ -f "$ENABLED" ] || break
             rotate_watch_log
-            say "[$(date '+%Y-%m-%d %H:%M:%S')] LAN changed (${bound_lan:-none} -> ${current_lan:-none}), restarting"
+            if [ "$lan_retry" = "1" ]; then
+              note_restart "lan retry: $current_lan"
+              say "[$(date '+%Y-%m-%d %H:%M:%S')] LAN retry ($current_lan), restarting"
+            else
+              note_restart "lan changed: ${bound_lan:-none} -> ${current_lan:-none}"
+              say "[$(date '+%Y-%m-%d %H:%M:%S')] LAN changed (${bound_lan:-none} -> ${current_lan:-none}), restarting"
+            fi
             rm -f "$LAN_CANDIDATE" "$LAN_CANDIDATE_COUNT" 2>/dev/null
             stop_daemon
             start_daemon >> "$WLOG" 2>&1
@@ -1868,6 +2035,13 @@ EOF
     bypass_uids="$(iptables -t mangle -S "$BYPASS_CHAIN" 2>/dev/null | grep -c -- '--uid-owner')"
   fi
   echo "bypass_uid=$bypass_uids"
+  restart_count=0
+  [ -s "$RESTARTS" ] && read -r restart_count < "$RESTARTS" 2>/dev/null
+  case "$restart_count" in ''|*[!0-9]*) restart_count=0 ;; esac
+  echo "restarts=$restart_count"
+  last_restart=""
+  [ -s "$LAST_RESTART" ] && read -r last_restart < "$LAST_RESTART" 2>/dev/null
+  echo "last_restart=$last_restart"
   echo "mode=chroot"
 }
 
@@ -1886,6 +2060,9 @@ diagnose() {
   echo "dns_file=$(tr '\n' ' ' < "$DNS_SERVERS" 2>/dev/null | sed 's/ $//')"
   echo "conflicts=$(ps -A -o NAME= 2>/dev/null | grep -cE '^(sing-box|clash|mihomo|xray|v2ray|hysteria)$')"
   echo "lan_detected=$(detect_lan_interfaces 2>/dev/null)"
+  lan_fail=""
+  [ -s "$LAN_FAIL" ] && read -r lan_fail < "$LAN_FAIL" 2>/dev/null
+  echo "lan_fail=${lan_fail:-none}"
   echo "tether_offload_disabled=$(settings get global tether_offload_disabled 2>/dev/null)"
 }
 

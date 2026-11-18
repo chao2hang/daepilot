@@ -13,6 +13,13 @@ class LogAlertParserTest {
     private val anomaly =
         " WARN datapath anomaly: pure SYN refused rewrite of a live flow's routing metadata " +
             "(type=5 pid=0 outbound=0 l4proto=6 10.0.0.1:50656 > 2607:f8b0::7:443)"
+    private val ipv4Anomaly =
+        " WARN datapath anomaly: pure SYN refused rewrite of a live flow's routing metadata " +
+            "(type=5 pid=0 outbound=0 l4proto=6 10.0.0.1:50657 > 142.250.1.1:443)"
+    private val certificateFailure =
+        " WARN DNS forward to upstream failed error=Get \"https://node.example/dns-query\": " +
+            "tls: failed to verify certificate: x509: certificate signed by unknown authority " +
+            "upstream=https://node.example/dns-query"
 
     @Test
     fun emptyInputHasNoAlerts() {
@@ -36,12 +43,26 @@ class LogAlertParserTest {
     @Test
     fun countsEachWarningCategory() {
         val alerts = LogAlertParser.parse(
-            listOf(dnsFailure, dnsFailure, udpDrop, anomaly, anomaly, anomaly),
+            listOf(dnsFailure, dnsFailure, udpDrop, anomaly, anomaly, anomaly, ipv4Anomaly),
         )
         assertEquals(2, alerts.dnsUpstreamFailures)
         assertEquals(1, alerts.udpQueueDrops)
-        assertEquals(3, alerts.datapathAnomalies)
-        assertEquals(6, alerts.total)
+        assertEquals(1, alerts.datapathAnomalies)
+        assertEquals(3, alerts.ipv6Retries)
+        assertEquals(0, alerts.certificateFailures)
+        assertEquals(4, alerts.total)
+        assertTrue(alerts.hasEntries)
+    }
+
+    @Test
+    fun certificateFailuresAreCountedSeparately() {
+        val alerts = LogAlertParser.parse(listOf(certificateFailure, certificateFailure, dnsFailure))
+        assertEquals(3, alerts.dnsUpstreamFailures)
+        assertEquals(2, alerts.certificateFailures)
+        assertEquals(
+            listOf("https://node.example/dns-query", "https://1.1.1.1:443/dns-query"),
+            alerts.failingUpstreams,
+        )
     }
 
     @Test
@@ -76,6 +97,7 @@ class LogAlertParserTest {
         )
         assertEquals(1, alerts.dnsUpstreamFailures)
         assertEquals(0, alerts.datapathAnomalies)
+        assertEquals(0, alerts.ipv6Retries)
         assertEquals(1, alerts.total)
     }
 
@@ -83,6 +105,9 @@ class LogAlertParserTest {
     fun windowWithoutStartupMarkerCountsEverything() {
         val alerts = LogAlertParser.parse(listOf(anomaly, dnsFailure))
         assertEquals(1, alerts.dnsUpstreamFailures)
-        assertEquals(1, alerts.datapathAnomalies)
+        assertEquals(0, alerts.datapathAnomalies)
+        assertEquals(1, alerts.ipv6Retries)
+        assertEquals(1, alerts.total)
+        assertTrue(alerts.hasEntries)
     }
 }

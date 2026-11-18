@@ -173,7 +173,7 @@ fun HomeScreen(
             // Anomalies outrank telemetry, and the action row sits above them: the
             // floating dock already owns the bottom of the screen, so anything
             // actionable has to be reachable without scrolling for it.
-            if (alerts.total > 0) {
+            if (alerts.hasEntries) {
                 AlertsCard(alerts = alerts, onOpenLogs = onOpenLogs)
             }
         }
@@ -215,6 +215,7 @@ fun HomeScreen(
             loading = busy,
             onRun = viewModel::diagnose,
             onDismiss = { showDiagnostics = false },
+            alerts = alerts,
         )
     }
 }
@@ -768,7 +769,11 @@ private fun AlertsCard(alerts: LogAlerts, onOpenLogs: () -> Unit) {
             Icon(
                 Icons.Outlined.WarningAmber,
                 contentDescription = null,
-                tint = palette.warning,
+                tint = if (alerts.total > 0) {
+                    palette.warning
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
                 modifier = Modifier.size(20.dp),
             )
             Spacer(Modifier.width(10.dp))
@@ -807,12 +812,28 @@ private fun AlertsCard(alerts: LogAlerts, onOpenLogs: () -> Unit) {
                 tone = palette.warning,
             )
         }
+        if (alerts.certificateFailures > 0) {
+            AlertRow(
+                label = "节点证书校验失败",
+                count = alerts.certificateFailures,
+                detail = "DoH 证书链不受信任，检查节点时间与证书",
+                tone = palette.warning,
+            )
+        }
         if (alerts.datapathAnomalies > 0) {
             AlertRow(
                 label = "数据面异常",
                 count = alerts.datapathAnomalies,
                 detail = "连接路由元数据冲突",
                 tone = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (alerts.ipv6Retries > 0) {
+            AlertRow(
+                label = "IPv6 回退重试",
+                count = alerts.ipv6Retries,
+                detail = "缓存 AAAA 重发，已阻止，可忽略",
+                tone = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
